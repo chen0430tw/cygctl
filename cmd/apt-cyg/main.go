@@ -2,15 +2,20 @@ package main
 
 import (
 	"bufio"
+	"compress/bzip2"
 	"compress/gzip"
+	"crypto/sha512"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -19,26 +24,54 @@ const (
 	CacheDir     = CygwinRoot + `\var\cache\apt-cyg`
 	SetupIni     = CacheDir + `\setup.ini`
 	InstalledDir = CygwinRoot + `\etc\setup`
-	Version      = "1.1.0"
+	Version      = "2.0.0"
+
+	// Hollow-package thresholds (mirrors bash version)
+	hollowMinBytes  = 1024
+	hollowWarnBytes = 65536
 )
 
 var (
 	DefaultMirror = "https://mirrors.kernel.org/sourceware/cygwin"
 	CurrentMirror = DefaultMirror
+	CurrentCache  = CacheDir
+	optArch       = "x86_64"
 )
+
+// Global options set by command-line flags
+var opts struct {
+	NoDeps      bool
+	NoScripts   bool
+	AllowHollow bool
+}
+
+// Essential packages that must not be removed
+var essentialPkgs = []string{
+	"bash", "coreutils", "grep", "gzip", "tar", "xz", "sed", "gawk",
+	"cygwin", "base-files", "base-cygwin",
+}
 
 type Package struct {
 	Name        string
 	Version     string
-	Install     string // download URL
+	Install     string // path relative to mirror root
+	Size        int64  // expected size in bytes
+	SHA512      string // expected SHA-512 hash (128 hex chars)
+	MD5         string // expected MD5 hash (32 hex chars), legacy
 	Depends     []string
 	Provides    []string
 	Category    string
 	Description string
 }
 
+type InstalledEntry struct {
+	Archive  string // e.g., bash-5.2.21-1.tar.xz
+	Explicit int    // 1=user-requested, 0=dependency
+}
+
+// ==================== MAIN ====================
+
 func main() {
-	// Detect if called as "apt" (alias mode)
 	execName := strings.ToLower(filepath.Base(os.Args[0]))
 	isAptAlias := execName == "apt.exe" || execName == "apt"
 
@@ -47,13 +80,36 @@ func main() {
 		os.Exit(0)
 	}
 
+	// First pass: extract global options before/after command
+	var cleanArgs []string
+	for _, arg := range os.Args[1:] {
+		switch arg {
+		case "--nodeps":
+			opts.NoDeps = true
+		case "--noscripts":
+			opts.NoScripts = true
+		case "--allow-hollow":
+			opts.AllowHollow = true
+		default:
+			cleanArgs = append(cleanArgs, arg)
+		}
+	}
+
+	if len(cleanArgs) == 0 {
+		showHelp(isAptAlias)
+		os.Exit(0)
+	}
+
+	// Read configuration from setup.rc (mirror, cache)
+	readSetupRC()
+
 	// Ensure cache directory exists
 	os.MkdirAll(CacheDir, 0755)
+	os.MkdirAll(InstalledDir, 0755)
 
-	command := os.Args[1]
-	args := os.Args[2:]
+	command := cleanArgs[0]
+	args := cleanArgs[1:]
 
-	// apt alias compatibility: map apt-get commands to apt-cyg equivalents
 	if isAptAlias {
 		command = mapAptCommand(command)
 	}
@@ -61,82 +117,105 @@ func main() {
 	switch command {
 	case "update":
 		cmdUpdate()
+
 	case "install":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No package specified")
-			os.Exit(1)
-		}
+		requireArgs(args, "install")
 		cmdInstall(args)
+
+	case "reinstall":
+		requireArgs(args, "reinstall")
+		cmdReinstall(args)
+
 	case "remove", "uninstall", "purge":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No package specified")
-			os.Exit(1)
-		}
+		requireArgs(args, command)
 		cmdRemove(args)
-	case "search":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No search term specified")
-			os.Exit(1)
-		}
-		cmdSearch(args[0])
-	case "list":
-		cmdList(args)
-	case "show", "info":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No package specified")
-			os.Exit(1)
-		}
-		cmdShow(args[0])
-	case "depends":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No package specified")
-			os.Exit(1)
-		}
-		cmdDepends(args[0])
-	case "rdepends":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No package specified")
-			os.Exit(1)
-		}
-		cmdRdepends(args[0])
+
 	case "upgrade":
 		cmdUpgrade(args)
+
+	case "search":
+		requireArgs(args, "search")
+		cmdSearch(args[0])
+
+	case "list":
+		cmdList(args)
+
+	case "listall":
+		requireArgs(args, "listall")
+		cmdListall(args[0])
+
+	case "listfiles":
+		requireArgs(args, "listfiles")
+		cmdListfiles(args)
+
+	case "show", "info":
+		requireArgs(args, command)
+		cmdShow(args[0])
+
+	case "depends":
+		requireArgs(args, "depends")
+		cmdDepends(args[0])
+
+	case "rdepends":
+		requireArgs(args, "rdepends")
+		cmdRdepends(args[0])
+
 	case "download":
-		if len(args) == 0 {
-			fmt.Fprintln(os.Stderr, "Error: No package specified")
-			os.Exit(1)
-		}
+		requireArgs(args, "download")
 		cmdDownload(args)
+
+	case "check":
+		requireArgs(args, "check")
+		cmdCheck(args)
+
+	case "category":
+		requireArgs(args, "category")
+		cmdCategory(args)
+
+	case "searchall":
+		requireArgs(args, "searchall")
+		cmdSearchall(args)
+
 	case "mirror":
-		if len(args) == 0 {
-			fmt.Println(CurrentMirror)
-		} else {
-			CurrentMirror = args[0]
-			fmt.Printf("Mirror set to: %s\n", CurrentMirror)
-		}
+		cmdMirror(args)
+
+	case "cache":
+		cmdCache(args)
+
 	case "autoremove":
 		cmdAutoremove()
+
 	case "clean":
 		cmdClean()
+
 	case "--help", "-h", "help":
 		showHelp(isAptAlias)
+
 	case "--version", "-v":
 		name := "apt-cyg"
 		if isAptAlias {
 			name = "apt"
 		}
-		fmt.Printf("%s version %s (Go)\n", name, Version)
+		fmt.Printf("%s version %s\n", name, Version)
+
 	default:
 		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", command)
+		showHelp(isAptAlias)
 		os.Exit(1)
 	}
 }
 
-// mapAptCommand maps apt/apt-get commands to apt-cyg equivalents
+func requireArgs(args []string, cmd string) {
+	if len(args) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: '%s' requires at least one argument\n", cmd)
+		os.Exit(1)
+	}
+}
+
 func mapAptCommand(cmd string) string {
 	mapping := map[string]string{
-		"get":        "install", // apt get -> apt install (deprecated)
-		"autoclean":  "clean",
+		"get":          "install",
+		"autoclean":    "clean",
 		"dist-upgrade": "upgrade",
 		"full-upgrade": "upgrade",
 	}
@@ -151,38 +230,108 @@ func showHelp(isAptAlias bool) {
 	if isAptAlias {
 		name = "apt"
 	}
-	help := name + ` - package manager for Cygwin (Go version)
+	fmt.Printf(`%s version %s - package manager for Cygwin
 
-Usage: ` + name + ` <command> [arguments]
+Usage: %s [options] <command> [arguments]
 
 Commands:
-  update              Download fresh package list from mirror
-  install <pkg...>    Install package(s) with dependencies
-  remove <pkg...>     Remove package(s)
-  search <pattern>    Search for packages matching pattern
-  list [--installed]  List packages (use --installed for installed only)
-  show <package>      Show detailed package information
-  depends <package>   Show package dependencies
-  rdepends <package>  Show reverse dependencies (what depends on this)
-  upgrade [pkg...]    Upgrade installed packages (all or specified)
-  download <pkg...>   Download packages without installing
-  autoremove          Remove unused dependencies
-  clean               Clear package cache
-  mirror [url]        Set or show current mirror
+  update                 Download fresh package list (setup.ini) from mirror
+  install <pkg...>       Install package(s) with dependencies
+  reinstall <pkg...>     Reinstall package(s), re-downloading archives
+  remove <pkg...>        Remove installed package(s)
+  upgrade [pkg...]       Upgrade named or all installed packages
+  search <pattern>       Search packages by name or description
+  list [pattern]         List installed packages (optionally filter)
+  listall <pattern>      Search all available packages in setup.ini
+  listfiles <pkg...>     List files installed by package(s)
+  show <package>         Show detailed package information
+  depends <package>      Show dependency tree
+  rdepends <package>     Show reverse dependency tree
+  download <pkg...>      Download package archives without installing
+  check <pkg...>         Inspect installed packages for hollow/stub installs
+  category <cat...>      List packages in named category
+  searchall <term...>    Search cygwin.com for packages containing a file
+  mirror [url]           Set or show current mirror URL
+  cache [dir]            Set or show local package cache directory
+  autoremove             Remove packages not needed by anything
+  clean                  Delete cached package archives
 
 Options:
-  --help, -h          Show this help
-  --version, -v       Show version
+  --nodeps               Skip dependency resolution
+  --noscripts            Skip postinstall scripts
+  --allow-hollow         Proceed even if archive appears to be a stub
+  --help, -h             Show this help
+  --version, -v          Show version
 
 Examples:
-  ` + name + ` update                    Update package list
-  ` + name + ` install vim git          Install vim and git
-  ` + name + ` search python            Search for python packages
-  ` + name + ` list --installed         List all installed packages
-  ` + name + ` upgrade                  Upgrade all packages
-  ` + name + ` remove vim               Remove vim
-`
-	fmt.Print(help)
+  %s update
+  %s install vim git python3
+  %s search python
+  %s list
+  %s upgrade
+  %s check bash
+  %s mirror https://cygwin.mirror.example.com
+`, name, Version, name, name, name, name, name, name, name, name)
+}
+
+// ==================== SETUP.RC ====================
+
+func setupRCPath() string {
+	return filepath.Join(CygwinRoot, "etc", "setup", "setup.rc")
+}
+
+// readSetupRC reads mirror and cache settings from Cygwin's setup.rc.
+func readSetupRC() {
+	data, err := os.ReadFile(setupRCPath())
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(data), "\n")
+	for i, line := range lines {
+		// Keys may optionally start with "<" in some setup.rc variants
+		key := strings.TrimSpace(strings.TrimLeft(line, "<"))
+		if i+1 >= len(lines) {
+			break
+		}
+		val := strings.TrimSpace(lines[i+1])
+		switch key {
+		case "last-mirror":
+			if val != "" {
+				CurrentMirror = strings.TrimRight(val, "/")
+			}
+		case "last-cache":
+			if val != "" {
+				CurrentCache = val
+			}
+		}
+	}
+}
+
+// writeSetupRCKey updates or appends a key-value pair in setup.rc.
+func writeSetupRCKey(key, value string) {
+	path := setupRCPath()
+	data, _ := os.ReadFile(path)
+
+	lines := strings.Split(string(data), "\n")
+	found := false
+	for i, line := range lines {
+		k := strings.TrimSpace(strings.TrimLeft(line, "<"))
+		if k == key && i+1 < len(lines) {
+			lines[i+1] = "\t" + value
+			found = true
+			break
+		}
+	}
+	if !found {
+		// Remove trailing empty line then append
+		for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+			lines = lines[:len(lines)-1]
+		}
+		lines = append(lines, "", key, "\t"+value, "")
+	}
+
+	os.MkdirAll(filepath.Dir(path), 0755)
+	os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
 }
 
 // ==================== UPDATE ====================
@@ -190,81 +339,94 @@ Examples:
 func cmdUpdate() {
 	fmt.Println("Updating package list...")
 
-	// Download setup.ini (uncompressed)
-	url := CurrentMirror + "/x86_64/setup.ini"
-	fmt.Printf("Downloading from %s\n", url)
+	// Back up existing setup.ini
+	bakPath := SetupIni + "-save"
+	os.Rename(SetupIni, bakPath)
 
-	resp, err := http.Get(url)
+	if tryDownloadSetup("setup.xz") || tryDownloadSetup("setup.bz2") || tryDownloadSetup("setup.ini") {
+		os.Remove(bakPath)
+		fmt.Println("Updated setup.ini")
+		return
+	}
+
+	// Restore backup on failure
+	fmt.Fprintln(os.Stderr, "Error updating setup.ini, reverting to backup")
+	os.Rename(bakPath, SetupIni)
+	os.Exit(1)
+}
+
+func tryDownloadSetup(filename string) bool {
+	u := CurrentMirror + "/" + optArch + "/" + filename
+	tmpPath := filepath.Join(CacheDir, filename)
+
+	fmt.Printf("  Trying %s ... ", filename)
+
+	resp, err := http.Get(u)
+	if err != nil || resp.StatusCode != 200 {
+		if resp != nil {
+			resp.Body.Close()
+		}
+		fmt.Println("not available")
+		return false
+	}
+
+	out, err := os.Create(tmpPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to download: %v\n", err)
-		os.Exit(1)
+		resp.Body.Close()
+		return false
 	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		fmt.Fprintf(os.Stderr, "Error: HTTP %d\n", resp.StatusCode)
-		os.Exit(1)
-	}
-
-	// Save to file
-	out, err := os.Create(SetupIni)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to create file: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Progress
-	counter := &writeCounter{}
-	_, err = io.Copy(out, io.TeeReader(resp.Body, counter))
-	fmt.Println()
+	_, err = io.Copy(out, resp.Body)
 	out.Close()
+	resp.Body.Close()
 
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to save file: %v\n", err)
-		os.Exit(1)
+		os.Remove(tmpPath)
+		return false
 	}
+	fmt.Println("OK")
 
-	fmt.Println("Update complete.")
-}
+	ext := filepath.Ext(filename)
+	switch ext {
+	case ".xz":
+		// Use Cygwin bash+xz to decompress
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cygTmp := toCygwinPath(tmpPath)
+		cygDest := toCygwinPath(SetupIni)
+		// xz -d decompresses in place, removing the .xz file
+		decompressed := strings.TrimSuffix(tmpPath, ".xz")
+		cmd := exec.Command(bashExe, "-c",
+			fmt.Sprintf("xz -d '%s' && mv '%s' '%s'",
+				cygTmp, toCygwinPath(decompressed), cygDest))
+		if err := cmd.Run(); err != nil {
+			os.Remove(tmpPath)
+			return false
+		}
 
-type writeCounter struct {
-	Total uint64
-}
+	case ".bz2":
+		// Use Go's bzip2 reader
+		f, err := os.Open(tmpPath)
+		if err != nil {
+			return false
+		}
+		br := bzip2.NewReader(f)
+		out, err := os.Create(SetupIni)
+		if err != nil {
+			f.Close()
+			return false
+		}
+		_, copyErr := io.Copy(out, br)
+		out.Close()
+		f.Close()
+		os.Remove(tmpPath)
+		if copyErr != nil {
+			os.Remove(SetupIni)
+			return false
+		}
 
-func (wc *writeCounter) Write(p []byte) (int, error) {
-	n := len(p)
-	wc.Total += uint64(n)
-	wc.PrintProgress()
-	return n, nil
-}
-
-func (wc *writeCounter) PrintProgress() {
-	fmt.Printf("\rDownloading... %d MB", wc.Total/1024/1024)
-}
-
-// ==================== HELPERS ====================
-
-func decompressGz(src, dst string) error {
-	f, err := os.Open(src)
-	if err != nil {
-		return err
+	default: // .ini — already the right format
+		os.Rename(tmpPath, SetupIni)
 	}
-	defer f.Close()
-
-	gz, err := gzip.NewReader(f)
-	if err != nil {
-		return err
-	}
-	defer gz.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	_, err = io.Copy(out, gz)
-	return err
+	return true
 }
 
 // ==================== SEARCH ====================
@@ -282,11 +444,11 @@ func cmdSearch(pattern string) {
 		os.Exit(1)
 	}
 
+	fmt.Println("Searching downloaded packages...")
 	for name, pkg := range packages {
 		if re.MatchString(name) || re.MatchString(pkg.Description) {
-			installed := isInstalled(name)
 			status := " "
-			if installed {
+			if isInstalled(name) {
 				status = "i"
 			}
 			fmt.Printf("[%s] %-30s %s\n", status, name, pkg.Description)
@@ -297,41 +459,87 @@ func cmdSearch(pattern string) {
 // ==================== LIST ====================
 
 func cmdList(args []string) {
-	installedOnly := false
-	for _, arg := range args {
-		if arg == "--installed" || arg == "-i" {
-			installedOnly = true
-		}
+	// List installed packages from installed.db (mirrors bash apt-list)
+	db := readInstalledDB()
+
+	var filter string
+	if len(args) > 0 && args[0] != "--installed" && args[0] != "-i" {
+		filter = args[0]
 	}
 
-	if installedOnly {
-		// List installed packages only
-		files, err := os.ReadDir(InstalledDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+	if len(db) == 0 {
+		fmt.Println("No packages installed.")
+		return
+	}
+
+	// Sort for deterministic output
+	names := make([]string, 0, len(db))
+	for name := range db {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		if filter != "" && !strings.Contains(name, filter) {
+			continue
+		}
+		entry := db[name]
+		fmt.Printf("%-30s %s\n", name, entry.Archive)
+	}
+}
+
+// ==================== LISTALL ====================
+
+func cmdListall(pattern string) {
+	packages, err := parseSetupIni()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	re, err := regexp.Compile("(?i)" + pattern)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Invalid pattern: %v\n", err)
+		os.Exit(1)
+	}
+
+	var matched []string
+	for name, pkg := range packages {
+		if re.MatchString(name) || re.MatchString(pkg.Description) {
+			matched = append(matched, name)
+		}
+	}
+	sort.Strings(matched)
+
+	for _, name := range matched {
+		pkg := packages[name]
+		status := " "
+		if isInstalled(name) {
+			status = "i"
+		}
+		fmt.Printf("[%s] %-30s %s\n", status, name, pkg.Description)
+	}
+	fmt.Printf("\n%d package(s) found.\n", len(matched))
+}
+
+// ==================== LISTFILES ====================
+
+func cmdListfiles(names []string) {
+	for _, name := range names {
+		lstFile := filepath.Join(InstalledDir, name+".lst.gz")
+		if _, err := os.Stat(lstFile); os.IsNotExist(err) {
+			fmt.Fprintf(os.Stderr, "%s: not installed or no file manifest\n", name)
+			continue
+		}
+
+		files := readFileList(lstFile)
+		if len(files) == 0 {
+			fmt.Fprintf(os.Stderr, "%s: empty file manifest\n", name)
+			continue
 		}
 
 		for _, f := range files {
-			if strings.HasSuffix(f.Name(), ".lst.gz") {
-				name := strings.TrimSuffix(f.Name(), ".lst.gz")
-				fmt.Println(name)
-			}
-		}
-	} else {
-		// List all available packages
-		packages, err := parseSetupIni()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
-		}
-
-		for name, pkg := range packages {
-			status := " "
-			if isInstalled(name) {
-				status = "i"
-			}
-			fmt.Printf("[%s] %-30s %s\n", status, name, pkg.Description)
+			fmt.Printf("/%s\n", strings.TrimPrefix(f, "./"))
 		}
 	}
 }
@@ -347,21 +555,45 @@ func cmdShow(name string) {
 
 	pkg, ok := packages[name]
 	if !ok {
-		fmt.Fprintf(os.Stderr, "Package not found: %s\n", name)
+		// Try fuzzy match
+		var similar []string
+		for pname := range packages {
+			if strings.Contains(strings.ToLower(pname), strings.ToLower(name)) {
+				similar = append(similar, pname)
+			}
+		}
+		if len(similar) > 0 {
+			sort.Strings(similar)
+			fmt.Fprintf(os.Stderr, "No exact match for %q. Similar packages:\n", name)
+			for _, s := range similar {
+				fmt.Fprintf(os.Stderr, "  %s\n", s)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "Unable to locate package %q\n", name)
+		}
 		os.Exit(1)
 	}
 
-	fmt.Printf("Package: %s\n", pkg.Name)
-	fmt.Printf("Version: %s\n", pkg.Version)
-	fmt.Printf("Category: %s\n", pkg.Category)
+	fmt.Printf("Package:     %s\n", pkg.Name)
+	fmt.Printf("Version:     %s\n", pkg.Version)
+	fmt.Printf("Category:    %s\n", pkg.Category)
+	if pkg.Size > 0 {
+		fmt.Printf("Size:        %s\n", humanSize(pkg.Size))
+	}
 	if len(pkg.Depends) > 0 {
-		fmt.Printf("Depends: %s\n", strings.Join(pkg.Depends, ", "))
+		fmt.Printf("Depends:     %s\n", strings.Join(pkg.Depends, ", "))
 	}
 	if len(pkg.Provides) > 0 {
-		fmt.Printf("Provides: %s\n", strings.Join(pkg.Provides, ", "))
+		fmt.Printf("Provides:    %s\n", strings.Join(pkg.Provides, ", "))
 	}
 	fmt.Printf("Description: %s\n", pkg.Description)
-	fmt.Printf("Installed: %v\n", isInstalled(name))
+	if isInstalled(name) {
+		db := readInstalledDB()
+		entry := db[name]
+		fmt.Printf("Installed:   yes (%s)\n", entry.Archive)
+	} else {
+		fmt.Printf("Installed:   no\n")
+	}
 }
 
 // ==================== DEPENDS ====================
@@ -373,36 +605,46 @@ func cmdDepends(name string) {
 		os.Exit(1)
 	}
 
-	pkg, ok := packages[name]
-	if !ok {
+	if _, ok := packages[name]; !ok {
 		fmt.Fprintf(os.Stderr, "Package not found: %s\n", name)
 		os.Exit(1)
 	}
 
 	fmt.Printf("Dependencies for %s:\n", name)
-	printDependencies(pkg.Depends, 0, packages)
+	path := []string{}
+	printDepsTree(name, packages, path, true)
 }
 
-func printDependencies(deps []string, level int, packages map[string]Package) {
-	indent := strings.Repeat("  ", level)
-	for _, depLine := range deps {
-		depList := strings.Split(depLine, ",")
-		for _, dep := range depList {
-			depName := cleanDepName(dep)
-			if depName == "" {
-				continue
-			}
-			installed := isInstalled(depName)
-			status := " "
-			if installed {
-				status = "i"
-			}
-			fmt.Printf("%s[%s] %s\n", indent, status, depName)
+func printDepsTree(name string, packages map[string]Package, path []string, forward bool) {
+	// Cycle guard
+	for _, p := range path {
+		if p == name {
+			return
+		}
+	}
+	newPath := append(append([]string{}, path...), name)
 
-			// Recursively show dependencies (limit depth to avoid infinite loops)
-			if level < 2 {
-				if subPkg, ok := packages[depName]; ok && len(subPkg.Depends) > 0 {
-					printDependencies(subPkg.Depends, level+1, packages)
+	if len(path) > 0 {
+		sep := " > "
+		if !forward {
+			sep = " < "
+		}
+		fmt.Printf("%s%s%s\n", strings.Repeat("  ", len(path)-1), strings.Join(newPath, sep), "")
+	}
+
+	if forward {
+		pkg, ok := packages[name]
+		if !ok {
+			return
+		}
+		for _, depLine := range pkg.Depends {
+			for _, dep := range strings.Split(depLine, ",") {
+				depName := cleanDepName(dep)
+				if depName == "" {
+					continue
+				}
+				if len(newPath) < 5 { // limit recursion depth
+					printDepsTree(depName, packages, newPath, forward)
 				}
 			}
 		}
@@ -418,31 +660,38 @@ func cmdRdepends(name string) {
 		os.Exit(1)
 	}
 
-	_, ok := packages[name]
-	if !ok {
+	if _, ok := packages[name]; !ok {
 		fmt.Fprintf(os.Stderr, "Package not found: %s\n", name)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Reverse dependencies for %s (packages that depend on it):\n", name)
+	fmt.Printf("Reverse dependencies for %s:\n", name)
 
-	// Find all packages that depend on this one
+	// Build reverse dep map
+	rdeps := make(map[string][]string)
 	for pkgName, pkg := range packages {
 		for _, depLine := range pkg.Depends {
-			depList := strings.Split(depLine, ",")
-			for _, dep := range depList {
+			for _, dep := range strings.Split(depLine, ",") {
 				depName := cleanDepName(dep)
-				if depName == name {
-					installed := isInstalled(pkgName)
-					status := " "
-					if installed {
-						status = "i"
-					}
-					fmt.Printf("[%s] %s - %s\n", status, pkgName, pkg.Description)
-					break
+				if depName != "" {
+					rdeps[depName] = append(rdeps[depName], pkgName)
 				}
 			}
 		}
+	}
+
+	dependents := rdeps[name]
+	sort.Strings(dependents)
+	for _, dep := range dependents {
+		status := " "
+		if isInstalled(dep) {
+			status = "i"
+		}
+		fmt.Printf("[%s] %s\n", status, dep)
+	}
+
+	if len(dependents) == 0 {
+		fmt.Printf("  No packages depend on %s\n", name)
 	}
 }
 
@@ -455,47 +704,65 @@ func cmdUpgrade(names []string) {
 		os.Exit(1)
 	}
 
-	// Get list of packages to upgrade
-	toUpgrade := []string{}
+	db := readInstalledDB()
+
+	var toCheck []string
 	if len(names) > 0 {
-		// Upgrade specific packages
 		for _, name := range names {
 			if !isInstalled(name) {
-				fmt.Printf("%s is not installed, skipping.\n", name)
+				fmt.Printf("%s is not installed; use 'install' instead\n", name)
 				continue
 			}
-			toUpgrade = append(toUpgrade, name)
+			toCheck = append(toCheck, name)
 		}
 	} else {
 		// Upgrade all installed packages
-		files, err := os.ReadDir(InstalledDir)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-			os.Exit(1)
+		for name := range db {
+			toCheck = append(toCheck, name)
 		}
-		for _, f := range files {
-			if strings.HasSuffix(f.Name(), ".lst.gz") {
-				name := strings.TrimSuffix(f.Name(), ".lst.gz")
-				toUpgrade = append(toUpgrade, name)
-			}
-		}
+		sort.Strings(toCheck)
 	}
 
-	if len(toUpgrade) == 0 {
+	if len(toCheck) == 0 {
 		fmt.Println("No packages to upgrade.")
 		return
 	}
 
-	fmt.Printf("Will upgrade %d package(s): %s\n", len(toUpgrade), strings.Join(toUpgrade, " "))
-
-	// Reinstall packages (this will download latest version)
-	for _, name := range toUpgrade {
+	upgraded := 0
+	for _, name := range toCheck {
 		pkg, ok := packages[name]
 		if !ok {
 			fmt.Printf("Warning: %s not found in repository, skipping.\n", name)
 			continue
 		}
-		installPackage(name, pkg)
+
+		currentBn := ""
+		if entry, inDB := db[name]; inDB {
+			currentBn = entry.Archive
+		}
+		availableBn := filepath.Base(pkg.Install)
+
+		if currentBn == availableBn {
+			fmt.Printf("%s is up to date (%s)\n", name, currentBn)
+			continue
+		}
+
+		if currentBn != "" {
+			fmt.Printf("Upgrading %s: %s -> %s\n", name, currentBn, availableBn)
+		} else {
+			fmt.Printf("Reinstalling %s: %s\n", name, availableBn)
+		}
+		installPackage(name, pkg, 1, true)
+		upgraded++
+	}
+
+	if upgraded == 0 {
+		fmt.Println("All packages are up to date.")
+	} else {
+		if !opts.NoScripts {
+			runAllPostinstall()
+		}
+		fmt.Printf("Upgraded %d package(s).\n", upgraded)
 	}
 }
 
@@ -517,47 +784,509 @@ func cmdDownload(names []string) {
 
 		cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
 
-		// Check if already downloaded
 		if _, err := os.Stat(cacheFile); err == nil {
 			fmt.Printf("%s already downloaded: %s\n", name, cacheFile)
 			continue
 		}
 
-		// Download
-		url := CurrentMirror + "/" + pkg.Install
-		fmt.Printf("Downloading %s from %s\n", name, url)
+		u := CurrentMirror + "/" + pkg.Install
+		fmt.Printf("Get: %s/%s [%s]\n", CurrentMirror, pkg.Install, humanSize(pkg.Size))
 
-		resp, err := http.Get(url)
-		if err != nil {
+		if err := downloadWithProgress(u, cacheFile, pkg.Size); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to download %s: %v\n", name, err)
 			continue
 		}
 
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			fmt.Fprintf(os.Stderr, "Error: HTTP %d for %s\n", resp.StatusCode, name)
-			continue
-		}
-
-		out, err := os.Create(cacheFile)
-		if err != nil {
-			resp.Body.Close()
-			fmt.Fprintf(os.Stderr, "Error: Failed to create file: %v\n", err)
-			continue
-		}
-
-		counter := &writeCounter{}
-		_, err = io.Copy(out, io.TeeReader(resp.Body, counter))
-		fmt.Println()
-		out.Close()
-		resp.Body.Close()
-
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to save %s: %v\n", name, err)
+		if err := verifyHash(name, cacheFile, pkg.SHA512, pkg.MD5); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Remove(cacheFile)
 			continue
 		}
 
 		fmt.Printf("%s downloaded to %s\n", name, cacheFile)
+	}
+}
+
+// ==================== CHECK ====================
+
+// cmdCheck inspects installed packages for hollow/stub installs.
+// Three checks: (1) cached archive integrity, (2) PE-header validity, (3) file presence.
+func cmdCheck(names []string) {
+	packages, _ := parseSetupIni()
+	db := readInstalledDB()
+	totalErrors := 0
+
+	for _, name := range names {
+		fmt.Printf("--- Checking %s ---\n", name)
+
+		if !isInstalled(name) {
+			fmt.Fprintf(os.Stderr, "  %s is not installed\n", name)
+			totalErrors++
+			continue
+		}
+
+		pkgErrors := 0
+		entry, hasEntry := db[name]
+
+		// Check 1: cached archive size and hash
+		if hasEntry {
+			archivePath := filepath.Join(CacheDir, entry.Archive)
+			if _, err := os.Stat(archivePath); err == nil {
+				if err := checkHollow(name, archivePath); err != nil {
+					fmt.Fprintf(os.Stderr, "  archive: %v\n", err)
+					pkgErrors++
+				} else {
+					// Re-verify hash against current setup.ini
+					if pkg, ok := packages[name]; ok {
+						if err := verifyHash(name, archivePath, pkg.SHA512, pkg.MD5); err != nil {
+							fmt.Fprintln(os.Stderr, " ", err)
+							pkgErrors++
+						} else {
+							fmt.Printf("  hash: OK\n")
+						}
+					}
+				}
+			} else {
+				fmt.Printf("  archive: not in cache (%s) — skipping archive/hash check\n", entry.Archive)
+			}
+		}
+
+		// Check 2: PE-header validation of installed DLLs/EXEs
+		if bad, total := checkPEBins(name); bad > 0 {
+			fmt.Fprintf(os.Stderr, "  binaries: %d/%d PE files failed MZ-header check\n", bad, total)
+			pkgErrors++
+		} else if total > 0 {
+			fmt.Printf("  binaries: %d PE file(s) OK\n", total)
+		}
+
+		// Check 3: presence of every recorded file on disk
+		lstFile := filepath.Join(InstalledDir, name+".lst.gz")
+		if _, err := os.Stat(lstFile); err == nil {
+			files := readFileList(lstFile)
+			missing, total := 0, 0
+			for _, f := range files {
+				if strings.HasSuffix(f, "/") {
+					continue
+				}
+				total++
+				fullPath := filepath.Join(CygwinRoot, strings.TrimPrefix(f, "./"))
+				if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+					fmt.Fprintf(os.Stderr, "  MISSING: /%s\n", strings.TrimPrefix(f, "./"))
+					missing++
+				}
+			}
+			if missing > 0 {
+				fmt.Fprintf(os.Stderr, "  files: %d/%d missing from filesystem\n", missing, total)
+				pkgErrors++
+			} else if total > 0 {
+				fmt.Printf("  files: %d/%d present\n", total, total)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "  files: no manifest found (/etc/setup/%s.lst.gz)\n", name)
+		}
+
+		totalErrors += pkgErrors
+		if pkgErrors == 0 {
+			fmt.Printf("  %s: OK\n", name)
+		} else {
+			fmt.Fprintf(os.Stderr, "  %s: %d issue(s) found\n", name, pkgErrors)
+		}
+		fmt.Println()
+	}
+
+	if totalErrors > 0 {
+		fmt.Fprintf(os.Stderr, "apt-check: %d issue(s) found across %d package(s).\n", totalErrors, len(names))
+		os.Exit(1)
+	}
+	fmt.Printf("apt-check: all %d package(s) OK.\n", len(names))
+}
+
+// ==================== CATEGORY ====================
+
+func cmdCategory(cats []string) {
+	packages, err := parseSetupIni()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, cat := range cats {
+		fmt.Printf("Packages in category '%s':\n", cat)
+
+		var matched []string
+		for name, pkg := range packages {
+			for _, c := range strings.Fields(pkg.Category) {
+				if strings.EqualFold(c, cat) {
+					matched = append(matched, name)
+					break
+				}
+			}
+		}
+		sort.Strings(matched)
+
+		for _, name := range matched {
+			pkg := packages[name]
+			status := " "
+			if isInstalled(name) {
+				status = "i"
+			}
+			fmt.Printf("  [%s] %-30s %s\n", status, name, pkg.Description)
+		}
+		if len(matched) == 0 {
+			fmt.Printf("  No packages found in category '%s'\n", cat)
+		}
+	}
+}
+
+// ==================== SEARCHALL ====================
+
+// cmdSearchall queries cygwin.com to find which package provides a given file.
+func cmdSearchall(terms []string) {
+	digitRe := regexp.MustCompile(`-\d`)
+
+	for _, term := range terms {
+		fmt.Printf("Searching cygwin.com for '%s'...\n", term)
+
+		u := fmt.Sprintf("https://cygwin.com/cgi-bin2/package-grep.cgi?text=1&arch=%s&grep=%s",
+			optArch, url.QueryEscape(term))
+
+		resp, err := http.Get(u)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			continue
+		}
+
+		seen := make(map[string]bool)
+		scanner := bufio.NewScanner(resp.Body)
+		firstLine := true
+		for scanner.Scan() {
+			line := scanner.Text()
+			if firstLine {
+				firstLine = false
+				continue // skip header line
+			}
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			// Skip debuginfo and 32-bit packages
+			if strings.Contains(line, "-debuginfo-") || strings.HasPrefix(line, "cygwin32-") {
+				continue
+			}
+			// Extract package name from "pkgname-version\tfile"
+			// Field separator is "-[digit]", mirroring the bash awk
+			if tab := strings.IndexByte(line, '\t'); tab >= 0 {
+				line = line[:tab]
+			}
+			pkgName := line
+			if loc := digitRe.FindStringIndex(pkgName); loc != nil {
+				pkgName = pkgName[:loc[0]]
+			}
+			if pkgName != "" && !seen[pkgName] {
+				seen[pkgName] = true
+				fmt.Println(pkgName)
+			}
+		}
+		resp.Body.Close()
+	}
+}
+
+// ==================== INSTALL ====================
+
+func cmdInstall(names []string) {
+	packages, err := parseSetupIni()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	toInstall := resolveInstallList(names, packages)
+
+	if len(toInstall) == 0 {
+		fmt.Println("All packages already installed.")
+		return
+	}
+
+	fmt.Printf("Will install %d package(s): %s\n", len(toInstall), strings.Join(toInstall, " "))
+
+	for _, name := range toInstall {
+		installPackage(name, packages[name], 1, false)
+	}
+
+	if !opts.NoScripts {
+		runAllPostinstall()
+	}
+}
+
+func cmdReinstall(names []string) {
+	packages, err := parseSetupIni()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	for _, name := range names {
+		pkg, ok := packages[name]
+		if !ok {
+			fmt.Fprintf(os.Stderr, "Error: Package not found: %s\n", name)
+			continue
+		}
+		// Force redownload by removing cached archive
+		cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
+		os.Remove(cacheFile)
+		installPackage(name, pkg, 1, true)
+	}
+
+	if !opts.NoScripts {
+		runAllPostinstall()
+	}
+}
+
+// resolveInstallList returns the ordered list of packages to install,
+// excluding already-installed ones.
+func resolveInstallList(names []string, packages map[string]Package) []string {
+	visiting := make(map[string]bool)
+	var ordered []string
+
+	for _, name := range names {
+		deps := resolveDependencies(name, packages, visiting)
+		ordered = append(ordered, deps...)
+	}
+
+	// Deduplicate and filter already installed
+	seen := make(map[string]bool)
+	var unique []string
+	for _, name := range ordered {
+		if !seen[name] && !isInstalled(name) {
+			seen[name] = true
+			unique = append(unique, name)
+		}
+	}
+	return unique
+}
+
+func resolveDependencies(name string, packages map[string]Package, visiting map[string]bool) []string {
+	// Resolve virtual package names (provides:)
+	resolved := resolveProvides(name, packages)
+	name = resolved
+
+	// Circular dependency guard
+	if visiting[name] {
+		fmt.Printf("  (skipping %s — already queued, circular dependency?)\n", name)
+		return nil
+	}
+
+	pkg, ok := packages[name]
+	if !ok {
+		fmt.Fprintf(os.Stderr, "Warning: Package not found: %s\n", name)
+		return nil
+	}
+
+	visiting[name] = true
+	defer func() { delete(visiting, name) }()
+
+	result := []string{name}
+
+	if opts.NoDeps {
+		return result
+	}
+
+	for _, depLine := range pkg.Depends {
+		for _, dep := range strings.Split(depLine, ",") {
+			depName := cleanDepName(dep)
+			if depName == "" {
+				continue
+			}
+			subDeps := resolveDependencies(depName, packages, visiting)
+			result = append(result, subDeps...)
+		}
+	}
+
+	return result
+}
+
+// resolveProvides returns the real package name if `name` is a virtual package
+// provided by another package.
+func resolveProvides(name string, packages map[string]Package) string {
+	if _, ok := packages[name]; ok {
+		return name
+	}
+	for pkgName, pkg := range packages {
+		for _, provided := range pkg.Provides {
+			if strings.EqualFold(strings.TrimSpace(provided), name) {
+				fmt.Printf("  (virtual %s provided by %s)\n", name, pkgName)
+				return pkgName
+			}
+		}
+	}
+	return name
+}
+
+// installPackage downloads (if needed), verifies, extracts, and records a package.
+// explicit: 1=user-requested, 0=dependency. force: reinstall even if recorded.
+func installPackage(name string, pkg Package, explicit int, force bool) {
+	if !force && isInstalled(name) {
+		fmt.Printf("Package %s is already installed, skipping\n", name)
+		return
+	}
+
+	if pkg.Install == "" {
+		fmt.Fprintf(os.Stderr, "Error: No install path for %s (obsolete package?)\n", name)
+		return
+	}
+
+	fmt.Printf("\nInstalling %s (%s)...\n", name, pkg.Version)
+
+	cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
+
+	// Download if not cached or if force-reinstall
+	needDownload := force
+	if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
+		needDownload = true
+	}
+
+	if needDownload {
+		u := CurrentMirror + "/" + pkg.Install
+		fmt.Printf("Get: %s/%s [%s]\n", CurrentMirror, pkg.Install, humanSize(pkg.Size))
+
+		if err := downloadWithProgress(u, cacheFile, pkg.Size); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: Failed to download %s: %v\n", name, err)
+			os.Exit(1)
+		}
+
+		// Verify hash
+		if err := verifyHash(name, cacheFile, pkg.SHA512, pkg.MD5); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Remove(cacheFile)
+			os.Exit(1)
+		}
+	} else {
+		fmt.Printf("  Using cached: %s\n", filepath.Base(cacheFile))
+	}
+
+	// Hollow-package check (pre-extraction)
+	if !opts.AllowHollow {
+		if err := checkHollow(name, cacheFile); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, "Use --allow-hollow to override.")
+			os.Exit(1)
+		}
+	}
+
+	// Save file listing and extract
+	fmt.Println("Unpacking...")
+	if err := extractPackage(cacheFile, CygwinRoot, name); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: Failed to extract %s: %v\n", name, err)
+		rollbackInstall(name)
+		os.Exit(1)
+	}
+
+	// PE-header check (post-extraction)
+	if !opts.AllowHollow {
+		if bad, _ := checkPEBins(name); bad > 0 {
+			fmt.Fprintf(os.Stderr, "Error: %s contains %d ghost binary/binaries (hollow install). Rolling back.\n", name, bad)
+			rollbackInstall(name)
+			os.Exit(1)
+		}
+	}
+
+	// Update installed.db
+	recordInstall(name, filepath.Base(cacheFile), explicit)
+
+	fmt.Printf("%s installed.\n", name)
+}
+
+func extractPackage(archivePath, dst, pkgName string) error {
+	bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+	cygSrc := toCygwinPath(archivePath)
+	cygDst := toCygwinPath(dst)
+
+	// Save file manifest: tar tf $archive | gzip > /etc/setup/$pkg.lst.gz
+	lstFile := toCygwinPath(filepath.Join(InstalledDir, pkgName+".lst.gz"))
+	listCmd := fmt.Sprintf("tar -tf '%s' | gzip > '%s'", cygSrc, lstFile)
+	exec.Command(bashExe, "-c", listCmd).Run() // best-effort
+
+	// Extract (tar auto-detects xz/bz2/gz compression)
+	extractCmd := fmt.Sprintf("tar -xf '%s' -C '%s'", cygSrc, cygDst)
+	cmd := exec.Command(bashExe, "-c", extractCmd)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
+}
+
+// rollbackInstall removes extracted files using the manifest if extraction failed.
+func rollbackInstall(name string) {
+	lstFile := filepath.Join(InstalledDir, name+".lst.gz")
+	if _, err := os.Stat(lstFile); err != nil {
+		return
+	}
+	fmt.Printf("Rolling back %s installation...\n", name)
+	files := readFileList(lstFile)
+	for _, f := range files {
+		if strings.HasSuffix(f, "/") {
+			continue
+		}
+		os.Remove(filepath.Join(CygwinRoot, strings.TrimPrefix(f, "./")))
+	}
+	os.Remove(lstFile)
+}
+
+// ==================== REMOVE ====================
+
+func cmdRemove(names []string) {
+	for _, name := range names {
+		if !isInstalled(name) {
+			fmt.Printf("Package %s is not installed, skipping\n", name)
+			continue
+		}
+
+		// Protect essential packages
+		for _, ess := range essentialPkgs {
+			if name == ess {
+				fmt.Fprintf(os.Stderr, "Error: Cannot remove essential package %s\n", name)
+				os.Exit(1)
+			}
+		}
+
+		fmt.Printf("Removing %s...\n", name)
+
+		// Run pre-remove script
+		runPreremove(name)
+
+		// Read file list
+		lstFile := filepath.Join(InstalledDir, name+".lst.gz")
+		files := readFileList(lstFile)
+
+		// Remove regular files
+		for _, f := range files {
+			if strings.HasSuffix(f, "/") {
+				continue
+			}
+			fullPath := filepath.Join(CygwinRoot, strings.TrimPrefix(f, "./"))
+			os.Remove(fullPath)
+		}
+
+		// Remove directories in reverse order (deepest first)
+		var dirs []string
+		for _, f := range files {
+			clean := strings.TrimRight(strings.TrimPrefix(f, "./"), "/")
+			if strings.HasSuffix(f, "/") && clean != "" && clean != "." {
+				dirs = append(dirs, clean)
+			}
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
+		for _, d := range dirs {
+			os.Remove(filepath.Join(CygwinRoot, d)) // silently fails if not empty
+		}
+
+		// Remove postinstall done marker
+		os.Remove(filepath.Join(CygwinRoot, "etc", "postinstall", name+".sh.done"))
+
+		// Remove records
+		os.Remove(lstFile)
+		removeFromInstalledDB(name)
+
+		fmt.Printf("Package %s removed.\n", name)
 	}
 }
 
@@ -566,68 +1295,58 @@ func cmdDownload(names []string) {
 func cmdAutoremove() {
 	fmt.Println("Finding unused dependencies...")
 
-	// Get all installed packages
-	installed := make(map[string]bool)
-	files, err := os.ReadDir(InstalledDir)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-	for _, f := range files {
-		if strings.HasSuffix(f.Name(), ".lst.gz") {
-			name := strings.TrimSuffix(f.Name(), ".lst.gz")
-			installed[name] = true
-		}
-	}
-
-	// Find explicitly installed packages (those manually requested)
-	// For now, we'll use a heuristic: packages in base category or with no dependencies are likely manual
+	db := readInstalledDB()
 	packages, err := parseSetupIni()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Build dependency graph
+	// Build set of packages needed as dependencies
 	needed := make(map[string]bool)
-	for name := range installed {
-		// Check if this package is a dependency of another installed package
-		for otherName := range installed {
-			if name == otherName {
-				continue
-			}
-			pkg := packages[otherName]
+	for name := range db {
+		if pkg, ok := packages[name]; ok {
 			for _, depLine := range pkg.Depends {
-				depList := strings.Split(depLine, ",")
-				for _, dep := range depList {
+				for _, dep := range strings.Split(depLine, ",") {
 					depName := cleanDepName(dep)
-					if depName == name {
-						needed[name] = true
+					if depName != "" {
+						needed[depName] = true
 					}
 				}
 			}
 		}
 	}
 
-	// Find orphaned packages
-	orphaned := []string{}
-	for name := range installed {
-		if !needed[name] {
-			// Skip essential packages
-			if name == "bash" || name == "coreutils" || name == "cygwin" ||
-				strings.HasPrefix(name, "lib") {
-				continue
-			}
-			orphaned = append(orphaned, name)
+	// Find orphans: installed but not needed as dep, and installed as dependency (explicit=0)
+	var orphans []string
+	for name, entry := range db {
+		if needed[name] {
+			continue
 		}
+		if entry.Explicit == 1 {
+			continue // explicitly installed by user
+		}
+		// Skip essential packages
+		isEss := false
+		for _, ess := range essentialPkgs {
+			if name == ess {
+				isEss = true
+				break
+			}
+		}
+		if isEss {
+			continue
+		}
+		orphans = append(orphans, name)
 	}
 
-	if len(orphaned) == 0 {
+	if len(orphans) == 0 {
 		fmt.Println("No orphaned packages found.")
 		return
 	}
 
-	fmt.Printf("Orphaned packages (%d): %s\n", len(orphaned), strings.Join(orphaned, " "))
+	sort.Strings(orphans)
+	fmt.Printf("Orphaned packages (%d): %s\n", len(orphans), strings.Join(orphans, " "))
 	fmt.Println("Use 'apt-cyg remove <package>' to remove them.")
 }
 
@@ -642,272 +1361,341 @@ func cmdClean() {
 		os.Exit(1)
 	}
 
-	// Keep setup.ini, remove package archives
 	removed := 0
 	var totalSize int64
 	for _, f := range files {
-		if f.Name() == "setup.ini" {
+		if f.Name() == "setup.ini" || f.Name() == "setup.ini-save" {
 			continue
 		}
-		filePath := filepath.Join(CacheDir, f.Name())
+		ext := strings.ToLower(filepath.Ext(f.Name()))
+		if ext != ".xz" && ext != ".bz2" && ext != ".gz" && ext != ".zst" {
+			continue // only remove package archives
+		}
 		info, err := f.Info()
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to stat %s: %v\n", f.Name(), err)
 			continue
 		}
 		totalSize += info.Size()
-		if err := os.Remove(filePath); err != nil {
+		if err := os.Remove(filepath.Join(CacheDir, f.Name())); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to remove %s: %v\n", f.Name(), err)
 		} else {
 			removed++
 		}
 	}
 
-	fmt.Printf("Removed %d files, freed %d MB\n", removed, totalSize/1024/1024)
+	fmt.Printf("Removed %d file(s), freed %s\n", removed, humanSize(totalSize))
 }
 
-// ==================== INSTALL ====================
+// ==================== MIRROR / CACHE ====================
 
-func cmdInstall(names []string) {
-	packages, err := parseSetupIni()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Resolve all packages and dependencies
-	toInstall := []string{}
-	for _, name := range names {
-		deps := resolveDependencies(name, packages, make(map[string]bool))
-		toInstall = append(toInstall, deps...)
-	}
-
-	// Remove duplicates
-	seen := make(map[string]bool)
-	unique := []string{}
-	for _, name := range toInstall {
-		if !seen[name] && !isInstalled(name) {
-			seen[name] = true
-			unique = append(unique, name)
-		}
-	}
-
-	if len(unique) == 0 {
-		fmt.Println("All packages already installed.")
+func cmdMirror(args []string) {
+	if len(args) == 0 {
+		fmt.Println(CurrentMirror)
 		return
 	}
-
-	fmt.Printf("Will install: %s\n", strings.Join(unique, " "))
-
-	for _, name := range unique {
-		installPackage(name, packages[name])
-	}
+	newMirror := strings.TrimRight(args[0], "/")
+	writeSetupRCKey("last-mirror", newMirror)
+	CurrentMirror = newMirror
+	fmt.Printf("Mirror set to %s\n", CurrentMirror)
 }
 
-func resolveDependencies(name string, packages map[string]Package, visited map[string]bool) []string {
-	if visited[name] {
-		return nil
+func cmdCache(args []string) {
+	if len(args) == 0 {
+		fmt.Println(CurrentCache)
+		return
 	}
-	visited[name] = true
-
-	pkg, ok := packages[name]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "Warning: Package not found: %s\n", name)
-		return nil
-	}
-
-	result := []string{name}
-	for _, depLine := range pkg.Depends {
-		// Dependencies are comma-separated: "bash, libncursesw10, libgcc1"
-		deps := strings.Split(depLine, ",")
-		for _, dep := range deps {
-			depName := cleanDepName(dep)
-			if depName == "" {
-				continue
-			}
-			subDeps := resolveDependencies(depName, packages, visited)
-			result = append(result, subDeps...)
+	newCache := args[0]
+	// Try to convert to Windows path if it looks like a Cygwin path
+	if strings.HasPrefix(newCache, "/") {
+		if wp, err := toWindowsPath(newCache); err == nil {
+			newCache = wp
 		}
 	}
+	writeSetupRCKey("last-cache", newCache)
+	CurrentCache = newCache
+	fmt.Printf("Cache set to %s\n", CurrentCache)
+}
 
+// ==================== INSTALLED.DB MANAGEMENT ====================
+
+func installedDBPath() string {
+	return filepath.Join(InstalledDir, "installed.db")
+}
+
+func readInstalledDB() map[string]InstalledEntry {
+	result := make(map[string]InstalledEntry)
+	data, err := os.ReadFile(installedDBPath())
+	if err != nil {
+		// Fall back to scanning .lst.gz files
+		files, err2 := os.ReadDir(InstalledDir)
+		if err2 != nil {
+			return result
+		}
+		for _, f := range files {
+			if strings.HasSuffix(f.Name(), ".lst.gz") {
+				name := strings.TrimSuffix(f.Name(), ".lst.gz")
+				result[name] = InstalledEntry{Archive: name + ".tar.xz", Explicit: 1}
+			}
+		}
+		return result
+	}
+
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "INSTALLED.DB") {
+			continue
+		}
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			explicit := 1
+			if len(parts) >= 3 {
+				explicit, _ = strconv.Atoi(parts[2])
+			}
+			result[parts[0]] = InstalledEntry{Archive: parts[1], Explicit: explicit}
+		}
+	}
 	return result
 }
 
-func cleanDepName(dep string) string {
-	// Dependencies are comma-separated: "bash, libncursesw10, libgcc1"
-	// Also handle space after comma
-	dep = strings.TrimSpace(dep)
-	dep = strings.TrimSuffix(dep, ",")
+func writeInstalledDB(db map[string]InstalledEntry) {
+	os.MkdirAll(InstalledDir, 0755)
 
-	// Skip empty, special chars, version constraints
-	if dep == "" || dep == "(" || dep == ")" {
-		return ""
+	names := make([]string, 0, len(db))
+	for name := range db {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	var sb strings.Builder
+	sb.WriteString("INSTALLED.DB 3\n")
+	for _, name := range names {
+		entry := db[name]
+		fmt.Fprintf(&sb, "%s %s %d\n", name, entry.Archive, entry.Explicit)
 	}
 
-	// Skip special virtual packages like _windows
-	if strings.HasPrefix(dep, "_") {
-		return ""
-	}
-
-	// Skip version operators and bare version numbers
-	if strings.HasPrefix(dep, ">") || strings.HasPrefix(dep, "<") ||
-		strings.HasPrefix(dep, "=") || strings.HasPrefix(dep, "!") ||
-		(len(dep) > 0 && dep[0] >= '0' && dep[0] <= '9') {
-		return ""
-	}
-
-	return dep
+	os.WriteFile(installedDBPath(), []byte(sb.String()), 0644)
 }
 
-func installPackage(name string, pkg Package) {
-	fmt.Printf("\nInstalling %s...\n", name)
-
-	// Download
-	cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
-	if _, err := os.Stat(cacheFile); os.IsNotExist(err) {
-		url := CurrentMirror + "/" + pkg.Install
-		fmt.Printf("Downloading %s\n", url)
-
-		resp, err := http.Get(url)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to download: %v\n", err)
-			os.Exit(1)
-		}
-		defer resp.Body.Close()
-
-		out, err := os.Create(cacheFile)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to create file: %v\n", err)
-			os.Exit(1)
-		}
-		_, err = io.Copy(out, resp.Body)
-		out.Close()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: Failed to save file: %v\n", err)
-			os.Exit(1)
-		}
-	}
-
-	// Extract
-	fmt.Println("Extracting...")
-	if err := extractTarXz(cacheFile, CygwinRoot, name); err != nil {
-		fmt.Fprintf(os.Stderr, "Error: Failed to extract: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Record installation
-	recordInstall(name)
-
-	// Run postinstall
-	runPostinstall(name)
-
-	fmt.Printf("%s installed.\n", name)
+func addToInstalledDB(name, archive string, explicit int) {
+	db := readInstalledDB()
+	db[name] = InstalledEntry{Archive: archive, Explicit: explicit}
+	writeInstalledDB(db)
 }
 
-func extractTarXz(src, dst, pkgName string) error {
-	// Convert Windows paths to Cygwin paths
-	cygSrc := toCygwinPath(src)
-	cygDst := toCygwinPath(dst)
+func removeFromInstalledDB(name string) {
+	db := readInstalledDB()
+	delete(db, name)
+	writeInstalledDB(db)
+}
+
+func isInstalled(name string) bool {
+	db := readInstalledDB()
+	if _, ok := db[name]; ok {
+		return true
+	}
+	// Fallback: check .lst.gz file directly
+	_, err := os.Stat(filepath.Join(InstalledDir, name+".lst.gz"))
+	return err == nil
+}
+
+func recordInstall(name, archive string, explicit int) {
+	addToInstalledDB(name, archive, explicit)
+}
+
+// ==================== POSTINSTALL / PREREMOVE ====================
+
+func runAllPostinstall() {
+	postinstDir := filepath.Join(CygwinRoot, "etc", "postinstall")
+	entries, err := os.ReadDir(postinstDir)
+	if err != nil {
+		return
+	}
+
 	bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+	for _, e := range entries {
+		name := e.Name()
+		if !strings.HasSuffix(name, ".sh") && !strings.HasSuffix(name, ".dash") {
+			continue
+		}
+		script := filepath.Join(postinstDir, name)
+		fmt.Printf("Running %s\n", script)
 
-	// Save file listing (like bash: tar tf $bn | gzip > /etc/setup/$pkg.lst.gz)
-	lstFile := toCygwinPath(filepath.Join(InstalledDir, pkgName+".lst.gz"))
-	listCmd := fmt.Sprintf("tar -tf '%s' | gzip > '%s'", cygSrc, lstFile)
-	cmd := exec.Command(bashExe, "-c", listCmd)
-	cmd.Stderr = os.Stderr
-	cmd.Run() // best-effort
-
-	// Extract
-	tarCmd := fmt.Sprintf("tar -xJf '%s' -C '%s'", cygSrc, cygDst)
-	cmd = exec.Command(bashExe, "-c", tarCmd)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
-}
-
-func toCygwinPath(winPath string) string {
-	// Convert Windows path to Cygwin path
-	// C:\cygwin64\... -> /cygdrive/c/cygwin64/...
-	cygPath := strings.ReplaceAll(winPath, `\`, "/")
-	if len(cygPath) >= 2 && cygPath[1] == ':' {
-		cygPath = "/cygdrive/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
-	}
-	return cygPath
-}
-
-func recordInstall(name string) {
-	// The .lst.gz file is already created by extractTarXz via the tar listing.
-	// If it doesn't exist yet, create an empty one as a marker.
-	lstFile := filepath.Join(InstalledDir, name+".lst.gz")
-	if _, err := os.Stat(lstFile); os.IsNotExist(err) {
-		os.MkdirAll(InstalledDir, 0755)
-		os.WriteFile(lstFile, []byte{}, 0644)
-	}
-}
-
-func runPostinstall(name string) {
-	postinst := filepath.Join(CygwinRoot, "etc", "postinstall", name+".sh")
-	if _, err := os.Stat(postinst); err == nil {
-		fmt.Printf("Running postinstall for %s...\n", name)
-		cmd := exec.Command(filepath.Join(CygwinRoot, "bin", "bash.exe"), "-c", postinst)
+		var cmd *exec.Cmd
+		if strings.HasSuffix(name, ".dash") {
+			dashExe := filepath.Join(CygwinRoot, "bin", "dash.exe")
+			cmd = exec.Command(dashExe, script)
+		} else {
+			cmd = exec.Command(bashExe, script)
+		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Run()
-
-		// Mark as done
-		doneFile := postinst + ".done"
-		os.Rename(postinst, doneFile)
+		os.Rename(script, script+".done")
 	}
 }
 
-// ==================== REMOVE ====================
+func runPreremove(name string) {
+	script := filepath.Join(CygwinRoot, "etc", "preremove", name+".sh")
+	if _, err := os.Stat(script); err == nil {
+		fmt.Printf("Running pre-remove script for %s...\n", name)
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cmd := exec.Command(bashExe, script)
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		cmd.Run()
+		os.Remove(script)
+	}
+}
 
-func cmdRemove(names []string) {
-	for _, name := range names {
-		if !isInstalled(name) {
-			fmt.Printf("%s is not installed.\n", name)
+// ==================== HOLLOW / PE-HEADER CHECKS ====================
+
+// checkHollow inspects an archive for hollow/stub characteristics.
+// Returns nil if the archive looks legitimate, error if it appears hollow.
+func checkHollow(pkg, archivePath string) error {
+	info, err := os.Stat(archivePath)
+	if err != nil {
+		return fmt.Errorf("cannot stat archive: %v", err)
+	}
+	size := info.Size()
+
+	if size < hollowMinBytes {
+		// Peek inside: if it's a valid tar with no .dll/.exe entries it may be
+		// a meta-package (safe). Only flag archives that are tiny AND binary-named.
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cygSrc := toCygwinPath(archivePath)
+		out, _ := exec.Command(bashExe, "-c",
+			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -ciE '\\.(dll|exe)$' || echo 0", cygSrc)).Output()
+		binCount := 0
+		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &binCount)
+
+		if binCount == 0 {
+			// Valid meta-package with no binaries
+			return nil
+		}
+
+		msg := fmt.Sprintf("*** HOLLOW PACKAGE: %s ***\n"+
+			"    Archive: %s\n"+
+			"    Size:    %d bytes (threshold: %d)\n"+
+			"    The archive passed hash verification because setup.ini records\n"+
+			"    the hash of the stub itself — there is no usable payload.\n"+
+			"    Try: apt-cyg listall %s",
+			pkg, filepath.Base(archivePath), size, hollowMinBytes, pkg)
+
+		if opts.AllowHollow {
+			fmt.Fprintln(os.Stderr, msg)
+			fmt.Fprintln(os.Stderr, "    (--allow-hollow set; proceeding anyway)")
+			return nil
+		}
+		return fmt.Errorf("%s", msg)
+	}
+
+	if size < hollowWarnBytes {
+		fmt.Fprintf(os.Stderr, "WARNING: %s archive is small (%s), verifying contents...\n",
+			pkg, humanSize(size))
+
+		// Count non-directory entries
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cygSrc := toCygwinPath(archivePath)
+		out, _ := exec.Command(bashExe, "-c",
+			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -vc '/$' || echo 0", cygSrc)).Output()
+		realFiles := 0
+		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &realFiles)
+
+		if realFiles == 0 {
+			msg := fmt.Sprintf("*** HOLLOW PACKAGE: %s — archive contains only directories ***", pkg)
+			if opts.AllowHollow {
+				fmt.Fprintln(os.Stderr, msg)
+				fmt.Fprintln(os.Stderr, "    (--allow-hollow set; proceeding anyway)")
+				return nil
+			}
+			return fmt.Errorf("%s", msg)
+		}
+	}
+
+	return nil
+}
+
+// checkPEBins verifies the MZ (PE) magic header of every .dll and .exe
+// installed by a package. Returns (bad count, total checked).
+func checkPEBins(pkg string) (bad, total int) {
+	lstFile := filepath.Join(InstalledDir, pkg+".lst.gz")
+	files := readFileList(lstFile)
+
+	for _, entry := range files {
+		if strings.HasSuffix(entry, "/") {
 			continue
 		}
-
-		fmt.Printf("Removing %s...\n", name)
-
-		// Read file list
-		lstFile := filepath.Join(InstalledDir, name+".lst.gz")
-		files := readFileList(lstFile)
-
-		// Remove files
-		for _, f := range files {
-			fullPath := filepath.Join(CygwinRoot, f)
-			os.Remove(fullPath)
+		lower := strings.ToLower(entry)
+		if !strings.HasSuffix(lower, ".dll") && !strings.HasSuffix(lower, ".exe") {
+			continue
 		}
+		total++
 
-		// Remove record
-		os.Remove(lstFile)
+		fullPath := filepath.Join(CygwinRoot, strings.TrimPrefix(entry, "./"))
+		f, err := os.Open(fullPath)
+		if err != nil {
+			continue // missing file caught by check 3
+		}
+		header := make([]byte, 2)
+		n, _ := f.Read(header)
+		f.Close()
 
-		fmt.Printf("%s removed.\n", name)
+		if n < 2 || header[0] != 0x4D || header[1] != 0x5A {
+			fmt.Fprintf(os.Stderr, "  GHOST BINARY: /%s (expected MZ header, got: %X)\n",
+				strings.TrimPrefix(entry, "./"), header[:n])
+			bad++
+		}
 	}
+	return bad, total
 }
 
-func readFileList(lstFile string) []string {
-	// Use zcat to decompress
-	cmd := exec.Command("zcat", lstFile)
-	output, err := cmd.Output()
+// ==================== HASH VERIFICATION ====================
+
+// verifyHash checks SHA-512 or MD5 of a downloaded file.
+func verifyHash(pkg, path, sha512hash, md5hash string) error {
+	if sha512hash != "" {
+		fmt.Printf("Verifying sha512sum  %s ... ", filepath.Base(path))
+		actual := sha512sumFile(path)
+		if actual == sha512hash {
+			fmt.Println("OK")
+			return nil
+		}
+		return fmt.Errorf("sha512sum FAILED for %s\n  Expected: %s\n  Got:      %s",
+			filepath.Base(path), sha512hash, actual)
+	}
+	if md5hash != "" {
+		// MD5 verification via bash md5sum
+		fmt.Printf("Verifying md5sum     %s ... ", filepath.Base(path))
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		out, err := exec.Command(bashExe, "-c",
+			fmt.Sprintf("md5sum '%s' | awk '{print $1}'", toCygwinPath(path))).Output()
+		if err != nil {
+			return fmt.Errorf("md5sum error: %v", err)
+		}
+		actual := strings.TrimSpace(string(out))
+		if actual == md5hash {
+			fmt.Println("OK")
+			return nil
+		}
+		return fmt.Errorf("md5sum FAILED for %s\n  Expected: %s\n  Got:      %s",
+			filepath.Base(path), md5hash, actual)
+	}
+	return nil // no hash available, skip verification
+}
+
+func sha512sumFile(path string) string {
+	f, err := os.Open(path)
 	if err != nil {
-		return nil
+		return ""
 	}
-
-	lines := []string{}
-	scanner := bufio.NewScanner(strings.NewReader(string(output)))
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if line != "" && !strings.HasPrefix(line, "#") {
-			lines = append(lines, line)
-		}
-	}
-	return lines
+	defer f.Close()
+	h := sha512.New()
+	io.Copy(h, f)
+	return fmt.Sprintf("%x", h.Sum(nil))
 }
 
-// ==================== HELPERS ====================
+// ==================== SETUP.INI PARSER ====================
 
 func parseSetupIni() (map[string]Package, error) {
 	if _, err := os.Stat(SetupIni); os.IsNotExist(err) {
@@ -922,58 +1710,216 @@ func parseSetupIni() (map[string]Package, error) {
 
 	packages := make(map[string]Package)
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024) // larger buffer for long lines
 
-	var currentPkg *Package
+	var cur *Package
 
 	for scanner.Scan() {
 		line := scanner.Text()
 
 		if strings.HasPrefix(line, "@ ") {
-			// Save previous package
-			if currentPkg != nil {
-				packages[currentPkg.Name] = *currentPkg
+			if cur != nil {
+				packages[cur.Name] = *cur
 			}
-			// Start new package
-			currentPkg = &Package{
-				Name: strings.TrimPrefix(line, "@ "),
+			cur = &Package{Name: strings.TrimPrefix(line, "@ ")}
+			continue
+		}
+
+		if cur == nil {
+			continue
+		}
+
+		switch {
+		case strings.HasPrefix(line, "version: "):
+			cur.Version = strings.TrimPrefix(line, "version: ")
+
+		case strings.HasPrefix(line, "install: "):
+			parts := strings.Fields(strings.TrimPrefix(line, "install: "))
+			if len(parts) > 0 {
+				cur.Install = parts[0]
 			}
-		} else if currentPkg != nil {
-			if strings.HasPrefix(line, "version: ") {
-				currentPkg.Version = strings.TrimPrefix(line, "version: ")
-			} else if strings.HasPrefix(line, "install: ") {
-				parts := strings.Fields(strings.TrimPrefix(line, "install: "))
-				if len(parts) > 0 {
-					currentPkg.Install = parts[0]
+			if len(parts) > 1 {
+				cur.Size, _ = strconv.ParseInt(parts[1], 10, 64)
+			}
+			if len(parts) > 2 {
+				hash := parts[2]
+				switch len(hash) {
+				case 32:
+					cur.MD5 = hash
+				case 128:
+					cur.SHA512 = hash
 				}
-			} else if strings.HasPrefix(line, "depends2:") {
-				// depends2: cygwin, libiconv2, libintl8
-				deps := strings.TrimPrefix(line, "depends2:")
-				deps = strings.TrimSpace(deps)
-				// Split by comma, store as single line for later processing
-				currentPkg.Depends = []string{deps}
-			} else if strings.HasPrefix(line, "category: ") {
-				currentPkg.Category = strings.TrimPrefix(line, "category: ")
-			} else if strings.HasPrefix(line, "sdesc: ") {
-				currentPkg.Description = strings.Trim(strings.TrimPrefix(line, "sdesc: "), "\"")
 			}
+
+		case strings.HasPrefix(line, "depends2:"), strings.HasPrefix(line, "depends:"):
+			raw := line[strings.Index(line, ":")+1:]
+			raw = strings.TrimSpace(raw)
+			// Remove version constraints: " (>= 1.0)"
+			raw = regexp.MustCompile(` \([^)]*\)`).ReplaceAllString(raw, "")
+			cur.Depends = []string{raw}
+
+		case strings.HasPrefix(line, "requires: "):
+			// Legacy format: space-separated, no version constraints
+			if len(cur.Depends) == 0 {
+				cur.Depends = []string{strings.TrimPrefix(line, "requires: ")}
+			}
+
+		case strings.HasPrefix(line, "provides: "):
+			raw := strings.TrimPrefix(line, "provides: ")
+			for _, p := range strings.Split(raw, ",") {
+				p = strings.TrimSpace(p)
+				if p != "" {
+					cur.Provides = append(cur.Provides, p)
+				}
+			}
+
+		case strings.HasPrefix(line, "category: "):
+			cur.Category = strings.TrimPrefix(line, "category: ")
+
+		case strings.HasPrefix(line, "sdesc: "):
+			cur.Description = strings.Trim(strings.TrimPrefix(line, "sdesc: "), `"`)
 		}
 	}
 
-	// Save last package
-	if currentPkg != nil {
-		packages[currentPkg.Name] = *currentPkg
+	if cur != nil {
+		packages[cur.Name] = *cur
 	}
 
 	return packages, scanner.Err()
 }
 
-func isInstalled(name string) bool {
-	lstFile := filepath.Join(InstalledDir, name+".lst.gz")
-	_, err := os.Stat(lstFile)
-	return err == nil
+// ==================== HELPERS ====================
+
+func cleanDepName(dep string) string {
+	dep = strings.TrimSpace(dep)
+	dep = strings.TrimSuffix(dep, ",")
+
+	if dep == "" || dep == "(" || dep == ")" {
+		return ""
+	}
+	// Skip virtual packages starting with underscore
+	if strings.HasPrefix(dep, "_") {
+		return ""
+	}
+	// Skip version operators and bare version numbers
+	if strings.HasPrefix(dep, ">") || strings.HasPrefix(dep, "<") ||
+		strings.HasPrefix(dep, "=") || strings.HasPrefix(dep, "!") ||
+		(len(dep) > 0 && dep[0] >= '0' && dep[0] <= '9') {
+		return ""
+	}
+	return dep
+}
+
+// readFileList decompresses a .lst.gz manifest and returns file paths.
+func readFileList(lstFile string) []string {
+	f, err := os.Open(lstFile)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+
+	var reader io.Reader
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		// Not gzipped, try as plain text
+		f.Seek(0, io.SeekStart)
+		reader = f
+	} else {
+		defer gz.Close()
+		reader = gz
+	}
+
+	var lines []string
+	scanner := bufio.NewScanner(reader)
+	for scanner.Scan() {
+		line := strings.TrimRight(scanner.Text(), "\r")
+		if line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func downloadWithProgress(u, dest string, expectedSize int64) error {
+	resp, err := http.Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return fmt.Errorf("HTTP %d from %s", resp.StatusCode, u)
+	}
+
+	if expectedSize <= 0 && resp.ContentLength > 0 {
+		expectedSize = resp.ContentLength
+	}
+
+	out, err := os.Create(dest)
+	if err != nil {
+		return err
+	}
+
+	counter := &progressCounter{Expected: expectedSize}
+	_, err = io.Copy(out, io.TeeReader(resp.Body, counter))
+	out.Close()
+	fmt.Println()
+	if err != nil {
+		os.Remove(dest)
+	}
+	return err
+}
+
+type progressCounter struct {
+	Total    int64
+	Expected int64
+}
+
+func (c *progressCounter) Write(p []byte) (int, error) {
+	n := len(p)
+	c.Total += int64(n)
+	if c.Expected > 0 {
+		pct := c.Total * 100 / c.Expected
+		bars := int(c.Total * 40 / c.Expected)
+		if bars > 40 {
+			bars = 40
+		}
+		bar := strings.Repeat("=", bars) + strings.Repeat(" ", 40-bars)
+		fmt.Printf("\r  [%s] %3d%%  %s", bar, pct, humanSize(c.Total))
+	} else {
+		fmt.Printf("\r  %s", humanSize(c.Total))
+	}
+	return n, nil
+}
+
+func humanSize(n int64) string {
+	switch {
+	case n < 1024:
+		return fmt.Sprintf("%d B", n)
+	case n < 1024*1024:
+		return fmt.Sprintf("%.1f kB", float64(n)/1024)
+	default:
+		return fmt.Sprintf("%.1f MB", float64(n)/1024/1024)
+	}
+}
+
+func toCygwinPath(winPath string) string {
+	cygPath := strings.ReplaceAll(winPath, `\`, "/")
+	if len(cygPath) >= 2 && cygPath[1] == ':' {
+		cygPath = "/cygdrive/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
+	}
+	return cygPath
+}
+
+func toWindowsPath(cygPath string) (string, error) {
+	cygpathExe := filepath.Join(CygwinRoot, "bin", "cygpath.exe")
+	out, err := exec.Command(cygpathExe, "-w", cygPath).Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 func init() {
-	// Detect number of CPUs for parallel operations
 	runtime.GOMAXPROCS(runtime.NumCPU())
 }

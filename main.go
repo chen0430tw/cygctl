@@ -113,9 +113,11 @@ func main() {
 
 func isAptCygCommand(arg string) bool {
 	aptCommands := []string{
-		"install", "remove", "update", "upgrade", "search", "show", "list",
-		"check", "reinstall", "depends", "rdepends", "download", "autoremove",
-		"clean", "mirror", "info", "uninstall", "purge",
+		"install", "reinstall", "remove", "uninstall", "purge",
+		"update", "upgrade", "search", "searchall",
+		"show", "info", "list", "listall", "listfiles",
+		"check", "depends", "rdepends", "download",
+		"autoremove", "clean", "mirror", "cache", "category",
 	}
 	for _, cmd := range aptCommands {
 		if arg == cmd {
@@ -233,20 +235,27 @@ Options:
     --help, -h               Show this help message
     --version                Show version information
 
-Apt Commands (package management - like WSL):
-    update                   Update package list
-    install <pkg...>         Install package(s)
+Apt Commands (package management):
+    update                   Update package list (setup.ini)
+    install <pkg...>         Install package(s) with dependencies
+    reinstall <pkg...>       Force reinstall package(s)
     remove <pkg...>          Remove package(s)
-    upgrade [pkg...]         Upgrade packages
-    search <pattern>         Search for packages
+    upgrade [pkg...]         Upgrade installed packages
+    search <pattern>         Search packages by name/description
+    searchall <term>         Search cygwin.com for packages containing file
     show <package>           Show package information
-    list [--installed]       List packages
-    depends <package>        Show dependencies
-    rdepends <package>       Show reverse dependencies
+    list [pattern]           List installed packages
+    listall <pattern>        Search all available packages
+    listfiles <pkg...>       List files installed by package
+    depends <package>        Show dependency tree
+    rdepends <package>       Show reverse dependency tree
+    check <pkg...>           Inspect packages for hollow/stub installs
     download <pkg...>        Download without installing
+    category <cat>           List packages in category
     autoremove               Remove unused dependencies
     clean                    Clear package cache
-    mirror [url]             Set or show mirror
+    mirror [url]             Set or show mirror URL
+    cache [dir]              Set or show package cache directory
 
 Sudo Command:
     sudo <command>           Run command with elevated privileges (UAC)
