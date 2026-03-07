@@ -19,7 +19,7 @@ A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 irm https://raw.githubusercontent.com/chen0430tw/cygctl/main/install.ps1 | iex
 ```
 
-安装完成后重启终端即可使用 `cyg` 和 `apt` 命令。
+Restart your terminal after installation to use `cyg` and `apt` commands.
 
 ## Manual Install
 
@@ -41,7 +41,6 @@ Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/dow
 | `cygctl.exe` | Main CLI tool |
 | `apt-cyg.exe` | Package manager |
 | `sudo.exe` | UAC elevation |
-| `setup.exe` | One-time setup script |
 
 ## Usage
 
@@ -114,10 +113,10 @@ cyg --help      # Show help
 | Command | Description |
 |---------|-------------|
 | `update` | Download fresh package list |
-| `install <pkg...>` | Install package(s) |
+| `install <pkg...>` | Install package(s) with dependencies |
 | `remove <pkg...>` | Remove package(s) |
 | `search <pattern>` | Search for packages |
-| `list [--installed]` | List packages |
+| `list [--installed]` | List all or installed packages |
 | `show <package>` | Show package info |
 | `depends <package>` | Show dependencies |
 | `rdepends <package>` | Show reverse dependencies |
@@ -127,17 +126,16 @@ cyg --help      # Show help
 | `clean` | Clear package cache |
 | `mirror [url]` | Set or show mirror |
 
-## Setup Script
+## install.ps1
 
-The `setup.exe` script configures:
+The installer script configures:
 
-1. **PATH** - Adds `C:\cygwin64\bin` to user PATH
-2. **PowerShell** - Creates aliases in profile
-3. **CMD** - Creates doskey macros with AutoRun
-4. **Git Bash** - Adds aliases to `.bashrc`
-5. **Cygwin** - Adds aliases to `.bashrc`
-
-After running setup, restart your terminal for changes to take effect.
+1. **Download** - Fetches binaries from GitHub Releases
+2. **PATH** - Adds `C:\cygwin64\bin` to user PATH
+3. **PowerShell** - Creates `cyg` and `apt` functions
+4. **CMD** - Creates doskey macros with AutoRun
+5. **Git Bash** - Adds aliases to `.bashrc`
+6. **Cygwin** - Adds aliases to `.bashrc`
 
 ## Building
 
@@ -147,13 +145,7 @@ Requires Go 1.21+
 # Build all
 make all
 
-# Build individual components
-make cygctl
-make apt-cyg
-make sudo
-make setup
-
-# Install
+# Install to Cygwin bin
 make install
 
 # Clean
