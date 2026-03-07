@@ -10,15 +10,26 @@ import (
 )
 
 const (
-	CygwinRoot  = `C:\cygwin64`
-	CygwinBin   = CygwinRoot + `\bin`
-	BashExe     = CygwinBin + `\bash.exe`
-	AptCyg      = CygwinRoot + `\usr\local\bin\apt-cyg`
-	SudoCmd     = CygwinRoot + `\usr\local\bin\sudo`
-	Version     = "1.0.0"
+	CygwinRoot = `C:\cygwin64`
+	CygwinBin  = CygwinRoot + `\bin`
+	BashExe    = CygwinBin + `\bash.exe`
+	AptCyg     = CygwinBin + `\apt.exe`
+	SudoCmd    = CygwinBin + `\sudo.exe`
+	Version    = "1.2.0"
+)
+
+// Executable names for alias detection
+const (
+	NameCygctl = "cygctl"
+	NameCyg    = "cyg"
 )
 
 func main() {
+	// Detect how we were invoked (supports symlinks/hardlinks)
+	exeName := strings.ToLower(filepath.Base(os.Args[0]))
+	// Remove .exe extension on Windows
+	exeName = strings.TrimSuffix(exeName, ".exe")
+
 	args := os.Args[1:]
 
 	// No arguments - interactive shell
@@ -40,10 +51,10 @@ func main() {
 
 		switch {
 		case arg == "--help" || arg == "-h" || arg == "/?":
-			showHelp()
+			showHelp(exeName)
 			return
 		case arg == "--version":
-			showVersion()
+			showVersion(exeName)
 			return
 		case arg == "--status":
 			showStatus()
@@ -110,7 +121,11 @@ func main() {
 }
 
 func isAptCygCommand(arg string) bool {
-	aptCommands := []string{"install", "remove", "update", "upgrade", "search", "show", "list", "check", "reinstall"}
+	aptCommands := []string{
+		"install", "remove", "update", "upgrade", "search", "show", "list",
+		"check", "reinstall", "depends", "rdepends", "download", "autoremove",
+		"clean", "mirror", "info", "uninstall", "purge",
+	}
 	for _, cmd := range aptCommands {
 		if arg == cmd {
 			return true
@@ -183,8 +198,13 @@ func runAptCyg(args []string) {
 		fmt.Fprintln(os.Stderr, "Please install apt-cyg first.")
 		os.Exit(2)
 	}
-	command := "apt-cyg " + strings.Join(args, " ")
-	execCommand(command, "")
+	// Execute apt-cyg.exe directly (native Windows executable)
+	cmd := exec.Command(AptCyg, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+	os.Exit(cmd.ProcessState.ExitCode())
 }
 
 func runSudo(args []string) {
@@ -193,14 +213,25 @@ func runSudo(args []string) {
 		fmt.Fprintln(os.Stderr, "Please install sudo for Cygwin first.")
 		os.Exit(2)
 	}
-	command := "sudo " + strings.Join(args, " ")
-	execCommand(command, "")
+	// Execute sudo.exe directly (native Windows UAC elevation)
+	cmd := exec.Command(SudoCmd, args...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Run()
+	os.Exit(cmd.ProcessState.ExitCode())
 }
 
-func showHelp() {
+func showHelp(exeName string) {
+	// Use shorter name in examples
+	exampleName := exeName
+	if exeName == NameCygctl {
+		exampleName = NameCyg // Show 'cyg' in examples for brevity
+	}
+
 	help := `Cygwin Command-Line Tool v` + Version + `
 
-Usage: cyg [OPTIONS]... [COMMAND]...
+Usage: ` + exampleName + ` [OPTIONS]... [COMMAND]...
 
 Options:
     --exec <command>         Execute the specified command
@@ -211,32 +242,37 @@ Options:
     --help, -h               Show this help message
     --version                Show version information
 
-Apt-cyg Commands (package management):
-    install <package>        Install a package
-    remove <package>         Remove a package
-    update                   Update package cache
-    upgrade                  Upgrade installed packages
-    search <keyword>         Search for packages
+Apt Commands (package management - like WSL):
+    update                   Update package list
+    install <pkg...>         Install package(s)
+    remove <pkg...>          Remove package(s)
+    upgrade [pkg...]         Upgrade packages
+    search <pattern>         Search for packages
     show <package>           Show package information
-    list                     List installed packages
-    check                    Check for hollow/stub packages
+    list [--installed]       List packages
+    depends <package>        Show dependencies
+    rdepends <package>       Show reverse dependencies
+    download <pkg...>        Download without installing
+    autoremove               Remove unused dependencies
+    clean                    Clear package cache
+    mirror [url]             Set or show mirror
 
 Sudo Command:
     sudo <command>           Run command with elevated privileges (UAC)
 
 Examples:
-    cyg                              Launch interactive Cygwin shell
-    cyg --exec "ls -la /cygdrive/c"  List C: drive contents
-    cyg --cd "D:\Projects" --exec "pwd"  Change dir and print working directory
-    cyg --status                     Show Cygwin status
-    cyg install vim                  Install vim package
-    cyg sudo nano /etc/hosts         Edit hosts file with admin rights
+    ` + exampleName + `                              Launch interactive Cygwin shell
+    ` + exampleName + ` --exec "ls -la /cygdrive/c"  List C: drive contents
+    ` + exampleName + ` --cd "D:\Projects" --exec "pwd"  Change dir and print working directory
+    ` + exampleName + ` --status                     Show Cygwin status
+    ` + exampleName + ` install vim                  Install vim package
+    ` + exampleName + ` sudo nano /etc/hosts         Edit hosts file with admin rights
 `
 	fmt.Print(help)
 }
 
-func showVersion() {
-	fmt.Printf("cyg version %s\n", Version)
+func showVersion(exeName string) {
+	fmt.Printf("%s version %s\n", exeName, Version)
 	fmt.Printf("Cygwin root: %s\n", CygwinRoot)
 	fmt.Printf("Go runtime: %s/%s\n", runtime.GOOS, runtime.GOARCH)
 

@@ -4,54 +4,160 @@ A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 
 ## Features
 
-- **Single executable** - No dependencies, just drop `cygctl.exe` into your PATH
+- **Single executable** - No dependencies, just drop into PATH
 - **WSL-like interface** - Familiar syntax for WSL users
 - **AI Agent friendly** - Simple, predictable command structure
 - **Full stdin/stdout support** - Proper pipe handling
 - **Exit code propagation** - Correct exit codes for scripting
+- **Package management** - apt-cyg rewritten in Go
+- **UAC elevation** - sudo for Windows admin tasks
 
-## Installation
+## Quick Install
 
-```bash
-# Copy cygctl.exe to Cygwin bin directory
-cp cygctl.exe C:\cygwin64\bin\
+```powershell
+# PowerShell (one-liner)
+irm https://raw.githubusercontent.com/chen0430tw/cygctl/main/install.ps1 | iex
 ```
+
+安装完成后重启终端即可使用 `cyg` 和 `apt` 命令。
+
+## Manual Install
+
+```powershell
+# Download binaries to Cygwin bin
+$bin = "C:\cygwin64\bin"
+Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/cygctl.exe" -OutFile "$bin\cygctl.exe"
+Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/apt-cyg.exe" -OutFile "$bin\apt-cyg.exe"
+Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/sudo.exe" -OutFile "$bin\sudo.exe"
+
+# Add to PATH
+[Environment]::SetEnvironmentVariable("PATH", "$bin;" + [Environment]::GetEnvironmentVariable("PATH", "User"), "User")
+```
+
+## Components
+
+| File | Description |
+|------|-------------|
+| `cygctl.exe` | Main CLI tool |
+| `apt-cyg.exe` | Package manager |
+| `sudo.exe` | UAC elevation |
+| `setup.exe` | One-time setup script |
 
 ## Usage
 
+### Basic Commands
+
 ```bash
 # Interactive shell
-cygctl
+cyg
 
 # Execute command
-cygctl --exec "ls -la /cygdrive/c"
-cygctl -e "echo hello"
+cyg --exec "ls -la /cygdrive/c"
+cyg -e "echo hello"
 
 # Execute with directory change
-cygctl --cd "D:\Projects" --exec "pwd"
+cyg --cd "D:\Projects" --exec "pwd"
 
 # Direct command (like wsl)
-cygctl ls -la /tmp
-
-# Package management (apt-cyg)
-cygctl install vim
-cygctl search python
-
-# Status and management
-cygctl --status
-cygctl --shutdown
-
-# Help
-cygctl --help
-cygctl --version
+cyg ls -la /tmp
 ```
+
+### Package Management (apt-cyg)
+
+```bash
+# Update package list
+apt update
+
+# Search packages
+apt search python
+
+# Install packages
+apt install vim git
+
+# List installed packages
+apt list --installed
+
+# Show package info
+apt show bash
+
+# Show dependencies
+apt depends vim
+
+# Upgrade packages
+apt upgrade
+
+# Remove packages
+apt remove vim
+```
+
+### Sudo (UAC Elevation)
+
+```bash
+# Run command with admin privileges
+sudo netstat -an
+
+# Edit protected files
+sudo notepad C:\Windows\System32\drivers\etc\hosts
+```
+
+### Status and Management
+
+```bash
+cyg --status    # Show Cygwin status
+cyg --shutdown  # Terminate all Cygwin processes
+cyg --version   # Show version
+cyg --help      # Show help
+```
+
+## apt-cyg Commands
+
+| Command | Description |
+|---------|-------------|
+| `update` | Download fresh package list |
+| `install <pkg...>` | Install package(s) |
+| `remove <pkg...>` | Remove package(s) |
+| `search <pattern>` | Search for packages |
+| `list [--installed]` | List packages |
+| `show <package>` | Show package info |
+| `depends <package>` | Show dependencies |
+| `rdepends <package>` | Show reverse dependencies |
+| `upgrade [pkg...]` | Upgrade packages |
+| `download <pkg...>` | Download without installing |
+| `autoremove` | Find unused dependencies |
+| `clean` | Clear package cache |
+| `mirror [url]` | Set or show mirror |
+
+## Setup Script
+
+The `setup.exe` script configures:
+
+1. **PATH** - Adds `C:\cygwin64\bin` to user PATH
+2. **PowerShell** - Creates aliases in profile
+3. **CMD** - Creates doskey macros with AutoRun
+4. **Git Bash** - Adds aliases to `.bashrc`
+5. **Cygwin** - Adds aliases to `.bashrc`
+
+After running setup, restart your terminal for changes to take effect.
 
 ## Building
 
-Requires Go 1.26+
+Requires Go 1.21+
 
 ```bash
-go build -o cygctl.exe .
+# Build all
+make all
+
+# Build individual components
+make cygctl
+make apt-cyg
+make sudo
+make setup
+
+# Install
+make install
+
+# Clean
+make clean
 ```
 
 ## Why cygctl?
