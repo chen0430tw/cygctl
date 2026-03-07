@@ -42,7 +42,6 @@ func main() {
 	var (
 		workingDir string
 		command    string
-		mode       string // "normal", "apt-cyg", "sudo"
 	)
 
 	i := 0
@@ -75,16 +74,15 @@ func main() {
 				os.Exit(1)
 			}
 			workingDir = args[i+1]
-			i += 2
+			i++
 		case arg == "--user":
 			// Skip user argument (not fully implemented yet)
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "Error: Missing argument for --user")
 				os.Exit(1)
 			}
-			i += 2
+			i++
 		case isAptCygCommand(arg):
-			mode = "apt-cyg"
 			runAptCyg(args[i:])
 			return
 		case arg == "sudo":
@@ -102,21 +100,14 @@ func main() {
 		i++
 	}
 
-	// Execute based on mode
-	switch mode {
-	case "apt-cyg":
-		// Already handled above
-	case "sudo":
-		// Already handled above
-	default:
-		if command != "" {
-			execCommand(command, workingDir)
-		} else if workingDir != "" {
-			// Only --cd specified, launch interactive shell in that directory
-			execCommand("", workingDir)
-		} else {
-			runInteractive()
-		}
+	// Execute command or launch interactive shell
+	if command != "" {
+		execCommand(command, workingDir)
+	} else if workingDir != "" {
+		// Only --cd specified, launch interactive shell in that directory
+		execCommand("", workingDir)
+	} else {
+		runInteractive()
 	}
 }
 
@@ -347,23 +338,27 @@ func getCygwinProcesses() []ProcessInfo {
 
 	var processes []ProcessInfo
 	// Parse JSON output
-	lines := strings.Split(string(output), "\n")
+	outStr := strings.TrimSpace(string(output))
+	if outStr == "" || outStr == "null" {
+		return nil
+	}
+
+	lines := strings.Split(outStr, "\n")
 	var currentPid int
 	var currentName string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		line = strings.TrimSuffix(line, ",")
 		if strings.Contains(line, `"Id"`) {
-			// Extract PID
-			parts := strings.Split(line, ":")
+			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
 				fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &currentPid)
 			}
 		}
 		if strings.Contains(line, `"ProcessName"`) {
-			// Extract name
-			parts := strings.Split(line, ":")
+			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
-				currentName = strings.Trim(strings.TrimSpace(parts[1]), `"`,)
+				currentName = strings.Trim(strings.TrimSpace(parts[1]), `"`)
 			}
 		}
 		if currentPid > 0 && currentName != "" {

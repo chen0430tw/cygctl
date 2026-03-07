@@ -213,11 +213,9 @@ func runClient(args []string) int {
 	code := 0
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				code = status.ExitStatus()
-			} else {
-				code = 1
-			}
+			code = exitErr.ExitCode()
+		} else {
+			code = 1
 		}
 	}
 

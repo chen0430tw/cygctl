@@ -532,15 +532,16 @@ func cmdDownload(names []string) {
 			fmt.Fprintf(os.Stderr, "Error: Failed to download %s: %v\n", name, err)
 			continue
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode != 200 {
+			resp.Body.Close()
 			fmt.Fprintf(os.Stderr, "Error: HTTP %d for %s\n", resp.StatusCode, name)
 			continue
 		}
 
 		out, err := os.Create(cacheFile)
 		if err != nil {
+			resp.Body.Close()
 			fmt.Fprintf(os.Stderr, "Error: Failed to create file: %v\n", err)
 			continue
 		}
@@ -549,6 +550,7 @@ func cmdDownload(names []string) {
 		_, err = io.Copy(out, io.TeeReader(resp.Body, counter))
 		fmt.Println()
 		out.Close()
+		resp.Body.Close()
 
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: Failed to save %s: %v\n", name, err)
@@ -648,7 +650,11 @@ func cmdClean() {
 			continue
 		}
 		filePath := filepath.Join(CacheDir, f.Name())
-		info, _ := f.Info()
+		info, err := f.Info()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Warning: Failed to stat %s: %v\n", f.Name(), err)
+			continue
+		}
 		totalSize += info.Size()
 		if err := os.Remove(filePath); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to remove %s: %v\n", f.Name(), err)
@@ -743,10 +749,10 @@ func cleanDepName(dep string) string {
 		return ""
 	}
 
-	// Skip version operators
+	// Skip version operators and bare version numbers
 	if strings.HasPrefix(dep, ">") || strings.HasPrefix(dep, "<") ||
 		strings.HasPrefix(dep, "=") || strings.HasPrefix(dep, "!") ||
-		regexp.MustCompile(`^[0-9]`).MatchString(dep) {
+		(len(dep) > 0 && dep[0] >= '0' && dep[0] <= '9') {
 		return ""
 	}
 
@@ -784,7 +790,7 @@ func installPackage(name string, pkg Package) {
 
 	// Extract
 	fmt.Println("Extracting...")
-	if err := extractTarXz(cacheFile, CygwinRoot); err != nil {
+	if err := extractTarXz(cacheFile, CygwinRoot, name); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to extract: %v\n", err)
 		os.Exit(1)
 	}
@@ -798,14 +804,22 @@ func installPackage(name string, pkg Package) {
 	fmt.Printf("%s installed.\n", name)
 }
 
-func extractTarXz(src, dst string) error {
+func extractTarXz(src, dst, pkgName string) error {
 	// Convert Windows paths to Cygwin paths
 	cygSrc := toCygwinPath(src)
 	cygDst := toCygwinPath(dst)
+	bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
 
-	// Use Cygwin bash to execute tar
+	// Save file listing (like bash: tar tf $bn | gzip > /etc/setup/$pkg.lst.gz)
+	lstFile := toCygwinPath(filepath.Join(InstalledDir, pkgName+".lst.gz"))
+	listCmd := fmt.Sprintf("tar -tf '%s' | gzip > '%s'", cygSrc, lstFile)
+	cmd := exec.Command(bashExe, "-c", listCmd)
+	cmd.Stderr = os.Stderr
+	cmd.Run() // best-effort
+
+	// Extract
 	tarCmd := fmt.Sprintf("tar -xJf '%s' -C '%s'", cygSrc, cygDst)
-	cmd := exec.Command(filepath.Join(CygwinRoot, "bin", "bash.exe"), "-c", tarCmd)
+	cmd = exec.Command(bashExe, "-c", tarCmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -813,20 +827,22 @@ func extractTarXz(src, dst string) error {
 
 func toCygwinPath(winPath string) string {
 	// Convert Windows path to Cygwin path
-	// C:\cygwin64\... -> /c/cygwin64/... (Git Bash style)
-	// This works because Cygwin mounts C: on /c
+	// C:\cygwin64\... -> /cygdrive/c/cygwin64/...
 	cygPath := strings.ReplaceAll(winPath, `\`, "/")
 	if len(cygPath) >= 2 && cygPath[1] == ':' {
-		cygPath = "/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
+		cygPath = "/cygdrive/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
 	}
 	return cygPath
 }
 
 func recordInstall(name string) {
-	// Create .lst.gz file
+	// The .lst.gz file is already created by extractTarXz via the tar listing.
+	// If it doesn't exist yet, create an empty one as a marker.
 	lstFile := filepath.Join(InstalledDir, name+".lst.gz")
-	// Create empty file for now (full implementation would list files)
-	os.WriteFile(lstFile, []byte{}, 0644)
+	if _, err := os.Stat(lstFile); os.IsNotExist(err) {
+		os.MkdirAll(InstalledDir, 0755)
+		os.WriteFile(lstFile, []byte{}, 0644)
+	}
 }
 
 func runPostinstall(name string) {
