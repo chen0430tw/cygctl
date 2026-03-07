@@ -69,6 +69,8 @@ type InstalledEntry struct {
 	Explicit int    // 1=user-requested, 0=dependency
 }
 
+var versionConstraintRe = regexp.MustCompile(` \([^)]*\)`)
+
 // ==================== MAIN ====================
 
 func main() {
@@ -610,12 +612,12 @@ func cmdDepends(name string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Dependencies for %s:\n", name)
-	path := []string{}
-	printDepsTree(name, packages, path, true)
+	printDepsTree(name, packages, nil)
 }
 
-func printDepsTree(name string, packages map[string]Package, path []string, forward bool) {
+// printDepsTree prints the forward dependency tree rooted at name.
+// path tracks the current chain for cycle detection.
+func printDepsTree(name string, packages map[string]Package, path []string) {
 	// Cycle guard
 	for _, p := range path {
 		if p == name {
@@ -624,29 +626,20 @@ func printDepsTree(name string, packages map[string]Package, path []string, forw
 	}
 	newPath := append(append([]string{}, path...), name)
 
-	if len(path) > 0 {
-		sep := " > "
-		if !forward {
-			sep = " < "
-		}
-		fmt.Printf("%s%s%s\n", strings.Repeat("  ", len(path)-1), strings.Join(newPath, sep), "")
-	}
+	// Print current node: show full path joined with " > "
+	fmt.Printf("%s\n", strings.Join(newPath, " > "))
 
-	if forward {
-		pkg, ok := packages[name]
-		if !ok {
-			return
-		}
-		for _, depLine := range pkg.Depends {
-			for _, dep := range strings.Split(depLine, ",") {
-				depName := cleanDepName(dep)
-				if depName == "" {
-					continue
-				}
-				if len(newPath) < 5 { // limit recursion depth
-					printDepsTree(depName, packages, newPath, forward)
-				}
+	pkg, ok := packages[name]
+	if !ok {
+		return
+	}
+	for _, depLine := range pkg.Depends {
+		for _, dep := range strings.Split(depLine, ",") {
+			depName := cleanDepName(dep)
+			if depName == "" {
+				continue
 			}
+			printDepsTree(depName, packages, newPath)
 		}
 	}
 }
@@ -665,9 +658,7 @@ func cmdRdepends(name string) {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Reverse dependencies for %s:\n", name)
-
-	// Build reverse dep map
+	// Build reverse dependency map: dep -> []packages that require dep
 	rdeps := make(map[string][]string)
 	for pkgName, pkg := range packages {
 		for _, depLine := range pkg.Depends {
@@ -679,19 +670,29 @@ func cmdRdepends(name string) {
 			}
 		}
 	}
-
-	dependents := rdeps[name]
-	sort.Strings(dependents)
-	for _, dep := range dependents {
-		status := " "
-		if isInstalled(dep) {
-			status = "i"
-		}
-		fmt.Printf("[%s] %s\n", status, dep)
+	// Sort each entry for deterministic output
+	for k := range rdeps {
+		sort.Strings(rdeps[k])
 	}
 
-	if len(dependents) == 0 {
-		fmt.Printf("  No packages depend on %s\n", name)
+	printRdepsTree(name, rdeps, nil)
+}
+
+// printRdepsTree prints the reverse dependency tree rooted at name.
+func printRdepsTree(name string, rdeps map[string][]string, path []string) {
+	// Cycle guard
+	for _, p := range path {
+		if p == name {
+			return
+		}
+	}
+	newPath := append(append([]string{}, path...), name)
+
+	// Print current node: show full path joined with " < "
+	fmt.Printf("%s\n", strings.Join(newPath, " < "))
+
+	for _, parent := range rdeps[name] {
+		printRdepsTree(parent, rdeps, newPath)
 	}
 }
 
@@ -1346,8 +1347,18 @@ func cmdAutoremove() {
 	}
 
 	sort.Strings(orphans)
-	fmt.Printf("Orphaned packages (%d): %s\n", len(orphans), strings.Join(orphans, " "))
-	fmt.Println("Use 'apt-cyg remove <package>' to remove them.")
+	fmt.Printf("The following %d package(s) are no longer needed:\n", len(orphans))
+	fmt.Printf("  %s\n", strings.Join(orphans, " "))
+	fmt.Print("Remove them? [y/N] ")
+
+	var answer string
+	fmt.Scanln(&answer)
+	if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+		fmt.Println("Aborted.")
+		return
+	}
+
+	cmdRemove(orphans)
 }
 
 // ==================== CLEAN ====================
@@ -1751,12 +1762,19 @@ func parseSetupIni() (map[string]Package, error) {
 				}
 			}
 
-		case strings.HasPrefix(line, "depends2:"), strings.HasPrefix(line, "depends:"):
-			raw := line[strings.Index(line, ":")+1:]
-			raw = strings.TrimSpace(raw)
-			// Remove version constraints: " (>= 1.0)"
-			raw = regexp.MustCompile(` \([^)]*\)`).ReplaceAllString(raw, "")
+		case strings.HasPrefix(line, "depends2:"):
+			// Modern format: takes priority over depends: and requires:
+			raw := strings.TrimSpace(line[len("depends2:"):])
+			raw = versionConstraintRe.ReplaceAllString(raw, "")
 			cur.Depends = []string{raw}
+
+		case strings.HasPrefix(line, "depends:"):
+			// Only use if depends2: not already found for this package
+			if len(cur.Depends) == 0 {
+				raw := strings.TrimSpace(line[len("depends:"):])
+				raw = versionConstraintRe.ReplaceAllString(raw, "")
+				cur.Depends = []string{raw}
+			}
 
 		case strings.HasPrefix(line, "requires: "):
 			// Legacy format: space-separated, no version constraints
