@@ -42,7 +42,6 @@ func main() {
 	var (
 		workingDir string
 		command    string
-		mode       string // "normal", "apt-cyg", "sudo"
 	)
 
 	i := 0
@@ -75,16 +74,15 @@ func main() {
 				os.Exit(1)
 			}
 			workingDir = args[i+1]
-			i += 2
+			i++
 		case arg == "--user":
 			// Skip user argument (not fully implemented yet)
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "Error: Missing argument for --user")
 				os.Exit(1)
 			}
-			i += 2
+			i++
 		case isAptCygCommand(arg):
-			mode = "apt-cyg"
 			runAptCyg(args[i:])
 			return
 		case arg == "sudo":
@@ -102,29 +100,24 @@ func main() {
 		i++
 	}
 
-	// Execute based on mode
-	switch mode {
-	case "apt-cyg":
-		// Already handled above
-	case "sudo":
-		// Already handled above
-	default:
-		if command != "" {
-			execCommand(command, workingDir)
-		} else if workingDir != "" {
-			// Only --cd specified, launch interactive shell in that directory
-			execCommand("", workingDir)
-		} else {
-			runInteractive()
-		}
+	// Execute command or launch interactive shell
+	if command != "" {
+		execCommand(command, workingDir)
+	} else if workingDir != "" {
+		// Only --cd specified, launch interactive shell in that directory
+		execCommand("", workingDir)
+	} else {
+		runInteractive()
 	}
 }
 
 func isAptCygCommand(arg string) bool {
 	aptCommands := []string{
-		"install", "remove", "update", "upgrade", "search", "show", "list",
-		"check", "reinstall", "depends", "rdepends", "download", "autoremove",
-		"clean", "mirror", "info", "uninstall", "purge",
+		"install", "reinstall", "remove", "uninstall", "purge",
+		"update", "upgrade", "search", "searchall",
+		"show", "info", "list", "listall", "listfiles",
+		"check", "depends", "rdepends", "download",
+		"autoremove", "clean", "mirror", "cache", "category",
 	}
 	for _, cmd := range aptCommands {
 		if arg == cmd {
@@ -242,20 +235,27 @@ Options:
     --help, -h               Show this help message
     --version                Show version information
 
-Apt Commands (package management - like WSL):
-    update                   Update package list
-    install <pkg...>         Install package(s)
+Apt Commands (package management):
+    update                   Update package list (setup.ini)
+    install <pkg...>         Install package(s) with dependencies
+    reinstall <pkg...>       Force reinstall package(s)
     remove <pkg...>          Remove package(s)
-    upgrade [pkg...]         Upgrade packages
-    search <pattern>         Search for packages
+    upgrade [pkg...]         Upgrade installed packages
+    search <pattern>         Search packages by name/description
+    searchall <term>         Search cygwin.com for packages containing file
     show <package>           Show package information
-    list [--installed]       List packages
-    depends <package>        Show dependencies
-    rdepends <package>       Show reverse dependencies
+    list [pattern]           List installed packages
+    listall <pattern>        Search all available packages
+    listfiles <pkg...>       List files installed by package
+    depends <package>        Show dependency tree
+    rdepends <package>       Show reverse dependency tree
+    check <pkg...>           Inspect packages for hollow/stub installs
     download <pkg...>        Download without installing
+    category <cat>           List packages in category
     autoremove               Remove unused dependencies
     clean                    Clear package cache
-    mirror [url]             Set or show mirror
+    mirror [url]             Set or show mirror URL
+    cache [dir]              Set or show package cache directory
 
 Sudo Command:
     sudo <command>           Run command with elevated privileges (UAC)
@@ -347,23 +347,27 @@ func getCygwinProcesses() []ProcessInfo {
 
 	var processes []ProcessInfo
 	// Parse JSON output
-	lines := strings.Split(string(output), "\n")
+	outStr := strings.TrimSpace(string(output))
+	if outStr == "" || outStr == "null" {
+		return nil
+	}
+
+	lines := strings.Split(outStr, "\n")
 	var currentPid int
 	var currentName string
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
+		line = strings.TrimSuffix(line, ",")
 		if strings.Contains(line, `"Id"`) {
-			// Extract PID
-			parts := strings.Split(line, ":")
+			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
 				fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &currentPid)
 			}
 		}
 		if strings.Contains(line, `"ProcessName"`) {
-			// Extract name
-			parts := strings.Split(line, ":")
+			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
-				currentName = strings.Trim(strings.TrimSpace(parts[1]), `"`,)
+				currentName = strings.Trim(strings.TrimSpace(parts[1]), `"`)
 			}
 		}
 		if currentPid > 0 && currentName != "" {

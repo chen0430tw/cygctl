@@ -3,7 +3,9 @@
 package main
 
 import (
+	"crypto/rand"
 	"encoding/gob"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"net"
@@ -11,13 +13,19 @@ import (
 	"os/exec"
 	"os/signal"
 	"syscall"
+	"time"
 	"unsafe"
+	"strings"
 )
 
 const (
 	SEE_MASK_NOCLOSEPROCESS = 0x00000040
 	SW_HIDE                 = 0
 	SW_SHOW                 = 5
+
+	// How long to wait for the elevated process to connect back.
+	// If UAC is denied or the user dismisses the prompt, we give up after this.
+	acceptTimeout = 15 * time.Second
 )
 
 type SHELLEXECUTEINFO struct {
@@ -51,7 +59,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Check if running as client (elevated process)
+	// Internal client mode (runs elevated)
 	if os.Args[1] == "--client" {
 		os.Exit(runClient(os.Args[2:]))
 	}
@@ -61,7 +69,7 @@ func main() {
 }
 
 func runServer(args []string) int {
-	// Create listener
+	// Create TCP listener on a random local port
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sudo: cannot create listener: %v\n", err)
@@ -69,29 +77,65 @@ func runServer(args []string) int {
 	}
 	defer lis.Close()
 
-	// Get executable path
 	exe, err := os.Executable()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sudo: cannot find executable: %v\n", err)
 		return 1
 	}
 
-	// Build command args for elevated process
-	cmdArgs := []string{"--client", lis.Addr().String()}
+	// Generate a random auth token so only our elevated process can connect.
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		fmt.Fprintf(os.Stderr, "sudo: cannot generate token: %v\n", err)
+		return 1
+	}
+	token := hex.EncodeToString(tokenBytes)
+
+	// Pass token as first argument after address so the elevated process knows it
+	cmdArgs := []string{"--client", lis.Addr().String(), token}
 	cmdArgs = append(cmdArgs, args...)
 
-	// Run elevated process
+	// Launch the elevated process in a goroutine; if it fails (UAC denied)
+	// close the listener so Accept() unblocks.
+	elevateErr := make(chan error, 1)
 	go func() {
-		if err := shellExecuteAndWait(exe, cmdArgs); err != nil {
-			fmt.Fprintf(os.Stderr, "sudo: failed to elevate: %v\n", err)
-			lis.Close()
-		}
+		err := shellExecuteAndWait(exe, cmdArgs)
+		elevateErr <- err
+		lis.Close()
 	}()
 
-	// Accept connection
-	conn, err := lis.Accept()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: cannot execute command: %v\n", err)
+	// Accept connection with timeout (guards against UAC denial / user dismissal)
+	type acceptResult struct {
+		conn net.Conn
+		err  error
+	}
+	ch := make(chan acceptResult, 1)
+	go func() {
+		conn, err := lis.Accept()
+		ch <- acceptResult{conn, err}
+	}()
+
+	var conn net.Conn
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			// Could be UAC denial or genuine network error
+			select {
+			case err := <-elevateErr:
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "sudo: failed to elevate: %v\n", err)
+				} else {
+					fmt.Fprintln(os.Stderr, "sudo: elevated process did not connect")
+				}
+			default:
+				fmt.Fprintln(os.Stderr, "sudo: cannot accept connection (UAC denied?)")
+			}
+			return 1
+		}
+		conn = res.conn
+	case <-time.After(acceptTimeout):
+		fmt.Fprintln(os.Stderr, "sudo: timed out waiting for elevated process (UAC denied?)")
+		lis.Close()
 		return 1
 	}
 	defer conn.Close()
@@ -99,13 +143,26 @@ func runServer(args []string) int {
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 
-	// Send environment
+	// Step 1: Send token for client to verify (prevents rogue local connections)
+	if err := enc.Encode(token); err != nil {
+		fmt.Fprintf(os.Stderr, "sudo: cannot send token: %v\n", err)
+		return 1
+	}
+
+	// Step 2: Wait for client authentication acknowledgement
+	var ok bool
+	if err := dec.Decode(&ok); err != nil || !ok {
+		fmt.Fprintln(os.Stderr, "sudo: authentication failed — unexpected process connected")
+		return 1
+	}
+
+	// Step 3: Send environment to the elevated process
 	if err := enc.Encode(os.Environ()); err != nil {
 		fmt.Fprintf(os.Stderr, "sudo: cannot send environment: %v\n", err)
 		return 1
 	}
 
-	// Handle Ctrl+C
+	// Handle Ctrl+C: forward interrupt signal to elevated process
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, os.Interrupt)
 	go func() {
@@ -114,24 +171,26 @@ func runServer(args []string) int {
 		}
 	}()
 
-	// Forward stdin
+	// Forward stdin to elevated process
 	go func() {
 		buf := make([]byte, 4096)
 		for {
 			n, err := os.Stdin.Read(buf)
+			if n > 0 {
+				if encErr := enc.Encode(&msg{Name: "stdin", Data: buf[:n]}); encErr != nil {
+					return
+				}
+			}
 			if err != nil {
 				if err == io.EOF {
 					enc.Encode(&msg{Name: "close"})
 				}
 				return
 			}
-			if err := enc.Encode(&msg{Name: "stdin", Data: buf[:n]}); err != nil {
-				return
-			}
 		}
 	}()
 
-	// Receive output
+	// Receive and forward output / exit code from elevated process
 	for {
 		var m msg
 		if err := dec.Decode(&m); err != nil {
@@ -151,15 +210,16 @@ func runServer(args []string) int {
 }
 
 func runClient(args []string) int {
-	if len(args) < 2 {
-		fmt.Fprintln(os.Stderr, "sudo: client mode requires address")
+	// args: <addr> <token> <cmd> [cmd-args...]
+	if len(args) < 3 {
+		fmt.Fprintln(os.Stderr, "sudo: client mode requires address, token, and command")
 		return 1
 	}
 
 	addr := args[0]
-	cmdArgs := args[1:]
+	token := args[1]
+	cmdArgs := args[2:]
 
-	// Connect to server
 	conn, err := net.Dial("tcp", addr)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "sudo: cannot connect to server: %v\n", err)
@@ -170,24 +230,40 @@ func runClient(args []string) int {
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 
-	// Receive environment
+	// Step 1: Receive and verify the auth token
+	var receivedToken string
+	if err := dec.Decode(&receivedToken); err != nil {
+		return 1
+	}
+	if receivedToken != token {
+		enc.Encode(false)
+		fmt.Fprintln(os.Stderr, "sudo: auth token mismatch")
+		return 1
+	}
+	if err := enc.Encode(true); err != nil {
+		return 1
+	}
+
+	// Step 2: Receive environment from the (non-elevated) server
 	var environ []string
 	if err := dec.Decode(&environ); err != nil {
 		return 1
 	}
 
-	// Build command
+	// Step 3: Run command with the received environment
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = environ
 
-	// Setup pipes
-	stdinPipe, _ := cmd.StdinPipe()
-	stdoutPipe := &msgWriter{enc: enc, name: "stdout"}
-	stderrPipe := &msgWriter{enc: enc, name: "stderr"}
-	cmd.Stdout = stdoutPipe
-	cmd.Stderr = stderrPipe
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		enc.Encode(&msg{Name: "error", Error: err.Error()})
+		return 1
+	}
 
-	// Forward stdin from server
+	cmd.Stdout = &msgWriter{enc: enc, name: "stdout"}
+	cmd.Stderr = &msgWriter{enc: enc, name: "stderr"}
+
+	// Forward stdin / signals from server
 	go func() {
 		defer stdinPipe.Close()
 		for {
@@ -209,15 +285,14 @@ func runClient(args []string) int {
 		}
 	}()
 
-	// Run command
+	// Run command and report exit code
 	code := 0
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
-			if status, ok := exitErr.Sys().(syscall.WaitStatus); ok {
-				code = status.ExitStatus()
-			} else {
-				code = 1
-			}
+			code = exitErr.ExitCode()
+		} else {
+			enc.Encode(&msg{Name: "error", Error: err.Error()})
+			code = 1
 		}
 	}
 
@@ -235,10 +310,6 @@ func (w *msgWriter) Write(p []byte) (n int, err error) {
 		return 0, err
 	}
 	return len(p), nil
-}
-
-func (w *msgWriter) Close() error {
-	return nil
 }
 
 func shellExecuteAndWait(exe string, args []string) error {
@@ -262,7 +333,7 @@ func shellExecuteAndWait(exe string, args []string) error {
 
 	ret, _, _ := proc.Call(uintptr(unsafe.Pointer(&sei)))
 	if ret == 0 {
-		return fmt.Errorf("ShellExecuteExW failed")
+		return fmt.Errorf("ShellExecuteExW failed (UAC denied or error)")
 	}
 
 	if sei.hProcess != 0 {
@@ -274,23 +345,20 @@ func shellExecuteAndWait(exe string, args []string) error {
 }
 
 func makeCmdLine(args []string) string {
-	var cmdLine string
+	var parts []string
 	for _, arg := range args {
-		if cmdLine != "" {
-			cmdLine += " "
-		}
-		if containsSpace(arg) {
-			cmdLine += `"` + arg + `"`
+		if needsQuoting(arg) {
+			parts = append(parts, `"`+strings.ReplaceAll(arg, `"`, `\"`)+`"`)
 		} else {
-			cmdLine += arg
+			parts = append(parts, arg)
 		}
 	}
-	return cmdLine
+	return strings.Join(parts, " ")
 }
 
-func containsSpace(s string) bool {
+func needsQuoting(s string) bool {
 	for _, c := range s {
-		if c == ' ' || c == '\t' || c == '"' {
+		if c == ' ' || c == '\t' || c == '"' || c == '\\' {
 			return true
 		}
 	}
