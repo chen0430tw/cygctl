@@ -2,6 +2,8 @@
 
 # cygctl
 
+**cygctl** 是一个 Windows 命令行工具，让你在 PowerShell、CMD 或 Git Bash 中以与 `wsl` 相同的方式调用 Cygwin 命令，无需打开 Cygwin 自带的终端模拟器。
+
 > [!IMPORTANT]
 > **cygctl 不会安装、下载或配置 Cygwin 或 WSL。**
 > 它是一个控制工具，用于在**已安装的 Cygwin 环境**中执行命令，提供类似 WSL 的接口。

@@ -2,6 +2,8 @@ English | [简体中文](./README.zh-CN.md)
 
 # cygctl
 
+**cygctl** is a Windows command-line tool that lets you run Cygwin commands from any shell — PowerShell, CMD, or Git Bash — with the same interface as `wsl`, without touching Cygwin's own terminal emulator.
+
 > [!IMPORTANT]
 > **cygctl does NOT install, download, or set up Cygwin or WSL.**
 > It is a control tool for running commands inside an **already-installed Cygwin environment**, with a WSL-like interface.
