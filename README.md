@@ -9,8 +9,6 @@ English | [简体中文](./README.zh-CN.md)
 > It is a control tool for running commands inside an **already-installed Cygwin environment**, with a WSL-like interface.
 > To install Cygwin, visit [cygwin.com](https://www.cygwin.com). To install WSL, see the [Microsoft documentation](https://learn.microsoft.com/windows/wsl/install).
 
-A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
-
 **cygctl is not a shell alias or a shim.** A naive `alias cyg='bash.exe'` breaks the moment you pipe data, check exit codes, or need to switch users. cygctl is a purpose-built binary that handles:
 
 - **Correct stdio wiring** — stdin/stdout/stderr are connected properly so pipes and redirections work as expected
@@ -21,18 +19,7 @@ A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 - **WSL interop** — path format conversion and cross-environment command dispatch between Cygwin and WSL
 - **Package management** — `apt-cyg` rewritten in Go with proper dependency resolution
 
-The WSL-like interface is just the UX layer. The substance is everything underneath it.
-
-## Features
-
-- **Single executable** - No dependencies, just drop into PATH
-- **WSL-like interface** - Familiar syntax for WSL users
-- **AI Agent friendly** - Simple, predictable command structure
-- **Full stdin/stdout support** - Proper pipe handling
-- **Exit code propagation** - Correct exit codes for scripting
-- **Package management** - apt-cyg rewritten in Go
-- **UAC elevation** - sudo for Windows admin tasks
-- **User switching** - su for switching between Windows user accounts
+cygctl ships as a single executable with no dependencies — drop it into PATH and it's ready. Designed for AI Agents, developer scripts, and CI/CD pipelines.
 
 ## Quick Install
 
@@ -101,38 +88,20 @@ cyg ls -la /tmp
 ### Package Management (apt-cyg)
 
 ```bash
-# Update package list
-apt update
-
-# Search packages
-apt search python
-
-# Install packages
-apt install vim git
-
-# List installed packages
-apt list --installed
-
-# Show package info
-apt show bash
-
-# Show dependencies
-apt depends vim
-
-# Upgrade packages
-apt upgrade
-
-# Remove packages
-apt remove vim
+apt update               # Update package list
+apt search python        # Search packages
+apt install vim git      # Install packages
+apt list --installed     # List installed packages
+apt show bash            # Show package info
+apt depends vim          # Show dependencies
+apt upgrade              # Upgrade packages
+apt remove vim           # Remove packages
 ```
 
 ### Sudo (UAC Elevation)
 
 ```bash
-# Run command with admin privileges
 sudo netstat -an
-
-# Edit protected files
 sudo notepad C:\Windows\System32\drivers\etc\hosts
 ```
 
@@ -140,20 +109,16 @@ sudo notepad C:\Windows\System32\drivers\etc\hosts
 
 ```bash
 # Open an interactive login shell as another Windows user
-cyg --user alice
 su alice
 
 # Run a single command as another user
-cyg --user alice --exec "whoami"
 su alice whoami
 
-# Change directory then open shell as another user
+# Specify user via cyg
 cyg --user alice --cd "D:\Projects"
 ```
 
-> **Note:** `su` uses `CreateProcessWithLogonW` and requires the Windows
-> Secondary Logon service (`seclogon`) to be running.  It is enabled by
-> default on all modern Windows versions.
+> **Note:** `su` uses `CreateProcessWithLogonW` and requires the Windows Secondary Logon service (`seclogon`) to be running. It is enabled by default on all modern Windows versions.
 
 ### WSL Integration (cyg wsl)
 
@@ -168,8 +133,6 @@ cyg wsl --list
 
 # Convert a path between Windows / Cygwin / WSL formats
 cyg wsl --path "C:\Users\alice"
-cyg wsl --path /cygdrive/c/Users/alice
-cyg wsl --path /mnt/c/Users/alice
 # Output: windows=C:\Users\alice
 #         cygwin=/cygdrive/c/Users/alice
 #         wsl=/mnt/c/Users/alice
@@ -180,7 +143,7 @@ cyg wsl --exec -- ls -la /tmp
 # Run a command in a specific WSL distro
 cyg wsl --exec Ubuntu -- whoami
 
-# Shutdown all WSL VMs
+# Shut down all WSL VMs
 cyg wsl --shutdown
 ```
 
@@ -234,23 +197,10 @@ The installer script configures:
 Requires Go 1.21+
 
 ```bash
-# Build all
-make all
-
-# Install to Cygwin bin
-make install
-
-# Clean
-make clean
+make all      # Build all
+make install  # Install to Cygwin bin
+make clean    # Clean
 ```
-
-## Why cygctl?
-
-Existing Cygwin wrappers (like mintty) are terminal emulators, not command-line tools. cygctl fills the gap by providing a `wsl`-like interface for Cygwin, making it easy for:
-
-- AI Agents to execute Cygwin commands
-- Developers to script Cygwin operations
-- CI/CD pipelines to interact with Cygwin
 
 ## License
 
