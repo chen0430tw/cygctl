@@ -61,33 +61,77 @@ func main() {
 	os.Exit(runServer(username, cmdArgs))
 }
 
+// checkSecondaryLogon verifies that the Secondary Logon service (seclogon) is
+// running.  CreateProcessWithLogonW depends on this service; if it is stopped
+// or disabled the call will fail with a confusing "access denied" error.
+func checkSecondaryLogon() error {
+	scm, err := windows.OpenSCManager(nil, nil, windows.SC_MANAGER_CONNECT)
+	if err != nil {
+		// Cannot open SCM — proceed anyway; the API call will surface any real error.
+		return nil
+	}
+	defer windows.CloseServiceHandle(scm)
+
+	svcName, _ := windows.UTF16PtrFromString("seclogon")
+	svc, err := windows.OpenService(scm, svcName, windows.SERVICE_QUERY_STATUS)
+	if err != nil {
+		return nil // service not found on this edition — let the API decide
+	}
+	defer windows.CloseServiceHandle(svc)
+
+	var status windows.SERVICE_STATUS
+	if err := windows.QueryServiceStatus(svc, &status); err != nil {
+		return nil
+	}
+	if status.CurrentState != windows.SERVICE_RUNNING {
+		return fmt.Errorf(`the Secondary Logon service (seclogon) is not running.
+su.exe requires this service to switch Windows users without elevation.
+
+To start it (run as Administrator in cmd.exe or PowerShell):
+    sc start seclogon
+    sc config seclogon start= auto   (optional: start automatically at boot)
+
+Or via PowerShell:
+    Start-Service SecondaryLogon
+    Set-Service  SecondaryLogon -StartupType Automatic`)
+	}
+	return nil
+}
+
 // runServer runs in the caller's Windows user context.
 //
 // Design (mirroring cmd/sudo but using CreateProcessWithLogonW instead of UAC):
 //
-//  1. Validate the target user exists via LookupAccountNameW → get its domain.
-//  2. Prompt for the target user's password (echo-off via SetConsoleMode).
-//  3. Listen on a random loopback port; generate a one-time auth token.
-//  4. Spawn "su.exe --client <addr> <token> [cmd...]" as the target user
+//  1. Check the Secondary Logon service (seclogon) is running.
+//  2. Validate the target user exists via LookupAccountNameW → get its domain.
+//  3. Prompt for the target user's password (echo-off via SetConsoleMode).
+//  4. Listen on a random loopback port; generate a one-time auth token.
+//  5. Spawn "su.exe --client <addr> <token> [cmd...]" as the target user
 //     using CreateProcessWithLogonW (Secondary Logon service, no elevation needed).
-//  5. Accept the reverse connection, verify the token, then proxy stdin/stdout/stderr
+//  6. Accept the reverse connection, verify the token, then proxy stdin/stdout/stderr
 //     between the caller's terminal and the target user's bash session.
 func runServer(username string, cmdArgs []string) int {
-	// 1. Resolve username → Windows SID → domain name (also validates the account).
+	// 1. Ensure the Secondary Logon service is available before doing anything else.
+	if err := checkSecondaryLogon(); err != nil {
+		fmt.Fprintln(os.Stderr, "su:", err)
+		return 1
+	}
+
+	// 2. Resolve username → Windows SID → domain name (also validates the account).
 	domain, err := lookupUserDomain(username)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "su: unknown user '%s': %v\n", username, err)
 		return 1
 	}
 
-	// 2. Prompt for password with echo disabled.
+	// 3. Prompt for password with echo disabled.
 	password, err := readPassword(fmt.Sprintf("[su] Password for %s\\%s: ", domain, username))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "su: cannot read password: %v\n", err)
 		return 1
 	}
 
-	// 3. Listen on a random loopback port.
+	// 4. Listen on a random loopback port.
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "su: cannot create listener: %v\n", err)
@@ -101,7 +145,7 @@ func runServer(username string, cmdArgs []string) int {
 		return 1
 	}
 
-	// 4. Generate a one-time auth token to prevent rogue local connections.
+	// 5. Generate a one-time auth token to prevent rogue local connections.
 	tokenBytes := make([]byte, 16)
 	rand.Read(tokenBytes)
 	token := hex.EncodeToString(tokenBytes)
@@ -116,7 +160,7 @@ func runServer(username string, cmdArgs []string) int {
 		lis.Close()
 	}()
 
-	// 5. Accept the callback with a timeout.
+	// 6. Accept the callback with a timeout.
 	type result struct {
 		conn net.Conn
 		err  error
