@@ -1,4 +1,4 @@
-module sudo
+module cygctl/cmd/sudo
 
 go 1.26.1
 

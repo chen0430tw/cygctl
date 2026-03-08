@@ -1,4 +1,4 @@
-module su
+module cygctl/cmd/su
 
 go 1.24.0
 
