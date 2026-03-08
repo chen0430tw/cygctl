@@ -108,20 +108,54 @@ func getCygwinProcesses() []ProcessInfo {
 	return result
 }
 
+var (
+	modPsapi                    = windows.NewLazySystemDLL("psapi.dll")
+	procGetProcessImageFileName = modPsapi.NewProc("GetProcessImageFileNameW")
+)
+
 // queryProcessImagePath returns the full executable path of a process.
+// Uses GetProcessImageFileName (XP+) instead of QueryFullProcessImageName
+// (Vista+) for broader compatibility.
 func queryProcessImagePath(pid uint32) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, pid)
 	if err != nil {
 		return "", err
 	}
 	defer windows.CloseHandle(h)
 
 	var buf [windows.MAX_PATH]uint16
-	size := uint32(len(buf))
-	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
+	r, _, err := procGetProcessImageFileName.Call(
+		uintptr(h),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+	)
+	if r == 0 {
 		return "", err
 	}
-	return windows.UTF16ToString(buf[:size]), nil
+	ntPath := windows.UTF16ToString(buf[:r])
+	return devicePathToWin32(ntPath), nil
+}
+
+// devicePathToWin32 converts an NT device path (e.g. \Device\HarddiskVolume1\foo.exe)
+// to a Win32 drive-letter path (e.g. C:\foo.exe) using QueryDosDevice.
+func devicePathToWin32(ntPath string) string {
+	for c := 'A'; c <= 'Z'; c++ {
+		drive := string(c) + ":"
+		drivePtr, err := windows.UTF16PtrFromString(drive)
+		if err != nil {
+			continue
+		}
+		var devBuf [windows.MAX_PATH]uint16
+		n, err := windows.QueryDosDevice(drivePtr, &devBuf[0], uint32(len(devBuf)))
+		if err != nil || n == 0 {
+			continue
+		}
+		devPath := windows.UTF16ToString(devBuf[:n])
+		if strings.HasPrefix(ntPath, devPath+`\`) {
+			return drive + ntPath[len(devPath):]
+		}
+	}
+	return ntPath // fallback: return NT path as-is
 }
 
 // shutdownCygwin terminates all Cygwin processes atomically using a Job Object.
