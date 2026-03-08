@@ -109,11 +109,18 @@ if (-not (Test-Path $regPath)) {
 Set-ItemProperty -Path $regPath -Name "AutoRun" -Value "doskey /macrofile=`"$macrosFile`""
 Write-Host "  OK Created CMD macros" -ForegroundColor Green
 
-# 5. Git Bash aliases
-Write-Host "[5/6] Configuring Git Bash..." -ForegroundColor Green
-$bashrcPath = "$env:USERPROFILE\.bashrc"
-$bashAliases = @"
+# 5. Shell aliases via ~/.bash_env + BASH_ENV env var
+# This makes aliases available in BOTH interactive shells and non-interactive subprocesses
+# (AI agents, pipes, scripts) without needing -i or explicit source calls.
+Write-Host "[5/6] Configuring shell aliases..." -ForegroundColor Green
 
+# UTF-8 without BOM — a BOM at the start of a shell file causes bash to crash.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+# ~/.bash_env: no early-exit guard, so it is safe to source non-interactively.
+# When BASH_ENV points here, bash loads it automatically for every non-interactive shell.
+$bashEnvPath = "$env:USERPROFILE\.bash_env"
+$bashEnvContent = @"
 # Cygwin aliases
 # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling Unix paths (e.g. / -> C:/Program Files/Git/)
 # before they reach cygctl / apt-cyg, which need to receive them verbatim.
@@ -124,43 +131,59 @@ alias apt-cyg='apt-cyg.exe'
 alias sudo='sudo.exe'
 alias su='su.exe'
 "@
+[System.IO.File]::WriteAllText($bashEnvPath, $bashEnvContent.Replace("`r`n", "`n").TrimStart(), $utf8NoBom)
+Write-Host "  OK Written ~/.bash_env" -ForegroundColor Green
 
-# Normalize to LF so bash on Git Bash / Cygwin doesn't see CRLF artifacts.
-# Use UTF-8 without BOM — a BOM at the start of .bashrc causes bash to crash.
-$bashAliasesLF = $bashAliases.Replace("`r`n", "`n")
-$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+# Set BASH_ENV so every non-interactive bash (agents, subprocesses, pipes) auto-sources ~/.bash_env.
+# Git Bash inherits Windows user env vars, so this takes effect in new processes immediately.
+$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "User")
+if ($currentBashEnv -ne "$env:USERPROFILE\.bash_env") {
+    [Environment]::SetEnvironmentVariable("BASH_ENV", "$env:USERPROFILE\.bash_env", "User")
+    Write-Host "  OK Set BASH_ENV" -ForegroundColor Green
+} else {
+    Write-Host "  OK BASH_ENV already configured" -ForegroundColor Gray
+}
+
+# Patch ~/.bashrc to source ~/.bash_env for interactive Git Bash sessions.
+# Must appear before any early-exit guard (case $- in *i*) ;; *) return ;; esac).
+$bashrcPath = "$env:USERPROFILE\.bashrc"
+$bashrcSourceLine = @"
+
+# Load Cygwin aliases (non-interactive shells load this via BASH_ENV automatically)
+[ -f "`$HOME/.bash_env" ] && source "`$HOME/.bash_env"
+"@
+$bashrcSourceLineLF = $bashrcSourceLine.Replace("`r`n", "`n")
 
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
-    if ($content -match "MSYS_NO_PATHCONV") {
-        Write-Host "  OK Aliases already exist" -ForegroundColor Gray
+    if ($content -match "\.bash_env") {
+        Write-Host "  OK ~/.bashrc already sources ~/.bash_env" -ForegroundColor Gray
     } else {
-        # Append with LF line endings; re-write the whole file to guarantee encoding.
         $existing = [System.IO.File]::ReadAllText($bashrcPath)
-        [System.IO.File]::WriteAllText($bashrcPath, $existing + $bashAliasesLF, $utf8NoBom)
-        Write-Host "  OK Added aliases" -ForegroundColor Green
+        [System.IO.File]::WriteAllText($bashrcPath, $existing + $bashrcSourceLineLF, $utf8NoBom)
+        Write-Host "  OK Patched ~/.bashrc" -ForegroundColor Green
     }
 } else {
-    [System.IO.File]::WriteAllText($bashrcPath, $bashAliasesLF.TrimStart(), $utf8NoBom)
-    Write-Host "  OK Created .bashrc" -ForegroundColor Green
+    [System.IO.File]::WriteAllText($bashrcPath, $bashrcSourceLineLF.TrimStart(), $utf8NoBom)
+    Write-Host "  OK Created ~/.bashrc" -ForegroundColor Green
 }
 
-# 6. Cygwin bash aliases
+# 6. Cygwin ~/.bashrc — same source-line approach
 Write-Host "[6/6] Configuring Cygwin..." -ForegroundColor Green
 $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
 if (Test-Path (Split-Path $cygwinBashrc)) {
     if (Test-Path $cygwinBashrc) {
         $content = Get-Content $cygwinBashrc -Raw
-        if ($content -match "MSYS_NO_PATHCONV") {
-            Write-Host "  OK Aliases already exist" -ForegroundColor Gray
+        if ($content -match "\.bash_env") {
+            Write-Host "  OK Cygwin ~/.bashrc already sources ~/.bash_env" -ForegroundColor Gray
         } else {
             $existing = [System.IO.File]::ReadAllText($cygwinBashrc)
-            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $bashAliasesLF, $utf8NoBom)
-            Write-Host "  OK Added aliases" -ForegroundColor Green
+            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $bashrcSourceLineLF, $utf8NoBom)
+            Write-Host "  OK Patched Cygwin ~/.bashrc" -ForegroundColor Green
         }
     } else {
-        [System.IO.File]::WriteAllText($cygwinBashrc, $bashAliasesLF.TrimStart(), $utf8NoBom)
-        Write-Host "  OK Created .bashrc" -ForegroundColor Green
+        [System.IO.File]::WriteAllText($cygwinBashrc, $bashrcSourceLineLF.TrimStart(), $utf8NoBom)
+        Write-Host "  OK Created Cygwin ~/.bashrc" -ForegroundColor Green
     }
 } else {
     Write-Host "  SKIP Cygwin home not found" -ForegroundColor Gray
