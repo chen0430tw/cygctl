@@ -17,7 +17,7 @@ A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 
 ```powershell
 # PowerShell (one-liner)
-irm https://raw.githubusercontent.com/chen0430tw/cygctl/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/chen0430tw/cygctl/master/install.ps1 | iex
 ```
 
 Restart your terminal after installation to use `cyg` and `apt` commands.

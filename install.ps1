@@ -7,7 +7,7 @@
     Configures PATH and shell aliases.
 
 .EXAMPLE
-    irm https://raw.githubusercontent.com/chen0430tw/cygctl/main/install.ps1 | iex
+    irm https://raw.githubusercontent.com/chen0430tw/cygctl/master/install.ps1 | iex
 #>
 
 param(
