@@ -49,7 +49,7 @@ func main() {
 
 	// No arguments - interactive shell
 	if len(args) == 0 {
-		runInteractive()
+		runInteractive("")
 		return
 	}
 
@@ -57,6 +57,7 @@ func main() {
 	var (
 		workingDir string
 		command    string
+		runUser    string
 	)
 
 	i := 0
@@ -90,12 +91,12 @@ func main() {
 			}
 			workingDir = args[i+1]
 			i++
-		case arg == "--user":
-			// Skip user argument (not fully implemented yet)
+		case arg == "--user" || arg == "-u":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "Error: Missing argument for --user")
 				os.Exit(1)
 			}
+			runUser = args[i+1]
 			i++
 		case arg == "wsl":
 			runWslCommand(args[i+1:])
@@ -120,12 +121,12 @@ func main() {
 
 	// Execute command or launch interactive shell
 	if command != "" {
-		execCommand(command, workingDir)
+		execCommand(command, workingDir, runUser)
 	} else if workingDir != "" {
 		// Only --cd specified, launch interactive shell in that directory
-		execCommand("", workingDir)
+		execCommand("", workingDir, runUser)
 	} else {
-		runInteractive()
+		runInteractive(runUser)
 	}
 }
 
@@ -145,8 +146,14 @@ func isAptCygCommand(arg string) bool {
 	return false
 }
 
-func runInteractive() {
-	cmd := exec.Command(BashExe, "-i")
+func runInteractive(user string) {
+	var cmd *exec.Cmd
+	if user != "" {
+		// Launch a login shell as the specified user via su.
+		cmd = exec.Command(BashExe, "--login", "-c", fmt.Sprintf("su -l %s", user))
+	} else {
+		cmd = exec.Command(BashExe, "-i")
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -158,20 +165,36 @@ func runInteractive() {
 	os.Exit(cmd.ProcessState.ExitCode())
 }
 
-func execCommand(command string, workingDir string) {
+func execCommand(command string, workingDir string, user string) {
 	var cmd *exec.Cmd
+
+	// Build the inner shell script, optionally wrapped in su.
+	buildScript := func(script string) string {
+		if user != "" {
+			// Single-quote the inner command to pass it safely to su -c.
+			inner := strings.ReplaceAll(script, `'`, `'\''`)
+			return fmt.Sprintf("su -l %s -c '%s'", user, inner)
+		}
+		return script
+	}
 
 	if workingDir != "" {
 		cygPath := toCygwinPath(workingDir)
 		if command != "" {
-			cmd = exec.Command(BashExe, "--login", "-c", fmt.Sprintf("cd '%s' && %s", cygPath, command))
+			script := buildScript(fmt.Sprintf("cd '%s' && %s", cygPath, command))
+			cmd = exec.Command(BashExe, "--login", "-c", script)
 		} else {
-			// Only cd, launch interactive shell in that directory
-			cmd = exec.Command(BashExe, "-i")
-			cmd.Dir = workingDir
+			// Only --cd, launch interactive shell in that directory.
+			if user != "" {
+				script := buildScript(fmt.Sprintf("cd '%s' && exec bash -i", cygPath))
+				cmd = exec.Command(BashExe, "--login", "-c", script)
+			} else {
+				cmd = exec.Command(BashExe, "-i")
+				cmd.Dir = workingDir
+			}
 		}
 	} else {
-		cmd = exec.Command(BashExe, "--login", "-c", command)
+		cmd = exec.Command(BashExe, "--login", "-c", buildScript(command))
 	}
 
 	cmd.Stdin = os.Stdin
@@ -249,6 +272,8 @@ Options:
     --exec <command>         Execute the specified command
     -e <command>             Alias for --exec
     --cd <path>              Change to specified directory before executing
+    --user <name>            Run command (or shell) as the specified Cygwin user
+    -u <name>                Alias for --user
     --status                 Show Cygwin status information
     --shutdown               Terminate all Cygwin processes
     --help, -h               Show this help message
@@ -291,6 +316,8 @@ Examples:
     ` + exampleName + ` --exec "ls -la /cygdrive/c"  List C: drive contents
     ` + exampleName + ` --cd "D:\Projects" --exec "pwd"  Change dir and print working directory
     ` + exampleName + ` --status                     Show Cygwin + WSL status
+    ` + exampleName + ` --user alice                 Open shell as alice
+    ` + exampleName + ` --user alice --exec "whoami"  Run whoami as alice
     ` + exampleName + ` install vim                  Install vim package
     ` + exampleName + ` sudo nano /etc/hosts         Edit hosts file with admin rights
     ` + exampleName + ` wsl --list                   List WSL distros
