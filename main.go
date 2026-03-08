@@ -10,12 +10,9 @@ import (
 )
 
 const (
-	CygwinRoot = `C:\cygwin64`
-	CygwinBin  = CygwinRoot + `\bin`
-	BashExe    = CygwinBin + `\bash.exe`
-	AptCyg     = CygwinBin + `\apt.exe`
-	SudoCmd    = CygwinBin + `\sudo.exe`
-	Version    = "1.2.0"
+	// defaultCygwinRoot is used as fallback when the registry key is absent.
+	defaultCygwinRoot = `C:\cygwin64`
+	Version           = "1.2.0"
 )
 
 // Executable names for alias detection
@@ -23,6 +20,26 @@ const (
 	NameCygctl = "cygctl"
 	NameCyg    = "cyg"
 )
+
+// CygwinRoot and derived paths are set in init() via registry lookup on
+// Windows (or fall back to the compile-time default on other platforms).
+var (
+	CygwinRoot string
+	CygwinBin  string
+	BashExe    string
+	AptCyg     string
+	SudoCmd    string
+	SuCmd      string
+)
+
+func init() {
+	CygwinRoot = findCygwinRoot()
+	CygwinBin = CygwinRoot + `\bin`
+	BashExe = CygwinBin + `\bash.exe`
+	AptCyg = CygwinBin + `\apt.exe`
+	SudoCmd = CygwinBin + `\sudo.exe`
+	SuCmd = CygwinBin + `\su.exe`
+}
 
 func main() {
 	// Detect how we were invoked (supports symlinks/hardlinks)
@@ -34,7 +51,7 @@ func main() {
 
 	// No arguments - interactive shell
 	if len(args) == 0 {
-		runInteractive()
+		runInteractive("")
 		return
 	}
 
@@ -42,6 +59,7 @@ func main() {
 	var (
 		workingDir string
 		command    string
+		runUser    string
 	)
 
 	i := 0
@@ -75,13 +93,16 @@ func main() {
 			}
 			workingDir = args[i+1]
 			i++
-		case arg == "--user":
-			// Skip user argument (not fully implemented yet)
+		case arg == "--user" || arg == "-u":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "Error: Missing argument for --user")
 				os.Exit(1)
 			}
+			runUser = args[i+1]
 			i++
+		case arg == "wsl":
+			runWslCommand(args[i+1:])
+			return
 		case isAptCygCommand(arg):
 			runAptCyg(args[i:])
 			return
@@ -102,12 +123,12 @@ func main() {
 
 	// Execute command or launch interactive shell
 	if command != "" {
-		execCommand(command, workingDir)
+		execCommand(command, workingDir, runUser)
 	} else if workingDir != "" {
 		// Only --cd specified, launch interactive shell in that directory
-		execCommand("", workingDir)
+		execCommand("", workingDir, runUser)
 	} else {
-		runInteractive()
+		runInteractive(runUser)
 	}
 }
 
@@ -127,8 +148,20 @@ func isAptCygCommand(arg string) bool {
 	return false
 }
 
-func runInteractive() {
-	cmd := exec.Command(BashExe, "-i")
+func runInteractive(user string) {
+	var cmd *exec.Cmd
+	if user != "" {
+		// Delegate to su.exe which uses CreateProcessWithLogonW (Windows-native
+		// user switching) instead of the unreliable Cygwin su package.
+		if _, err := os.Stat(SuCmd); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error: su not found at", SuCmd)
+			fmt.Fprintln(os.Stderr, "Please build and install su.exe first (make su).")
+			os.Exit(2)
+		}
+		cmd = exec.Command(SuCmd, user)
+	} else {
+		cmd = exec.Command(BashExe, "-i")
+	}
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -140,15 +173,35 @@ func runInteractive() {
 	os.Exit(cmd.ProcessState.ExitCode())
 }
 
-func execCommand(command string, workingDir string) {
+func execCommand(command string, workingDir string, user string) {
 	var cmd *exec.Cmd
 
-	if workingDir != "" {
+	if user != "" {
+		// Delegate to su.exe (Windows-native user switching via CreateProcessWithLogonW).
+		if _, err := os.Stat(SuCmd); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error: su not found at", SuCmd)
+			fmt.Fprintln(os.Stderr, "Please build and install su.exe first (make su).")
+			os.Exit(2)
+		}
+		if workingDir != "" {
+			cygPath := toCygwinPath(workingDir)
+			if command != "" {
+				cmd = exec.Command(SuCmd, user, fmt.Sprintf("cd '%s' && %s", cygPath, command))
+			} else {
+				cmd = exec.Command(SuCmd, user, fmt.Sprintf("cd '%s' && exec bash -i", cygPath))
+			}
+		} else {
+			if command != "" {
+				cmd = exec.Command(SuCmd, user, command)
+			} else {
+				cmd = exec.Command(SuCmd, user)
+			}
+		}
+	} else if workingDir != "" {
 		cygPath := toCygwinPath(workingDir)
 		if command != "" {
 			cmd = exec.Command(BashExe, "--login", "-c", fmt.Sprintf("cd '%s' && %s", cygPath, command))
 		} else {
-			// Only cd, launch interactive shell in that directory
 			cmd = exec.Command(BashExe, "-i")
 			cmd.Dir = workingDir
 		}
@@ -169,21 +222,22 @@ func execCommand(command string, workingDir string) {
 	os.Exit(cmd.ProcessState.ExitCode())
 }
 
+// toCygwinPath converts a Windows path to a Cygwin POSIX path using a pure-Go
+// implementation.  This avoids spawning cygpath.exe as a subprocess.
+// For the rare cases where a custom cygdrive prefix is configured in
+// /etc/fstab the user-space default "/cygdrive" is used, which covers nearly
+// all Cygwin installations.
 func toCygwinPath(winPath string) string {
-	// Use cygpath for accurate conversion
-	cygpathExe := filepath.Join(CygwinBin, "cygpath.exe")
-	cmd := exec.Command(cygpathExe, "-u", winPath)
-	output, err := cmd.Output()
-	if err != nil {
-		// Fallback to regex
-		cygPath := strings.ReplaceAll(winPath, `\`, "/")
-		if len(cygPath) >= 2 && cygPath[1] == ':' {
-			cygPath = "/cygdrive/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
-		}
-		return cygPath
+	// Normalise backslashes
+	p := strings.ReplaceAll(winPath, `\`, "/")
+
+	// Drive letter conversion: C:/... → /cygdrive/c/...
+	if len(p) >= 2 && p[1] == ':' {
+		p = "/cygdrive/" + strings.ToLower(string(p[0])) + p[2:]
 	}
-	return strings.TrimSpace(string(output))
+	return p
 }
+
 
 func runAptCyg(args []string) {
 	if _, err := os.Stat(AptCyg); os.IsNotExist(err) {
@@ -230,6 +284,8 @@ Options:
     --exec <command>         Execute the specified command
     -e <command>             Alias for --exec
     --cd <path>              Change to specified directory before executing
+    --user <name>            Run command (or shell) as the specified Windows user
+    -u <name>                Alias for --user
     --status                 Show Cygwin status information
     --shutdown               Terminate all Cygwin processes
     --help, -h               Show this help message
@@ -260,13 +316,25 @@ Apt Commands (package management):
 Sudo Command:
     sudo <command>           Run command with elevated privileges (UAC)
 
+WSL Commands:
+    wsl                      Launch default WSL distro interactively
+    wsl --list               List WSL distributions with state and version
+    wsl --path <path>        Convert path between Windows / Cygwin / WSL formats
+    wsl --exec [<distro>] -- <cmd...>  Run command in WSL distro
+    wsl --shutdown           Shut down all WSL2 VMs
+
 Examples:
     ` + exampleName + `                              Launch interactive Cygwin shell
     ` + exampleName + ` --exec "ls -la /cygdrive/c"  List C: drive contents
     ` + exampleName + ` --cd "D:\Projects" --exec "pwd"  Change dir and print working directory
-    ` + exampleName + ` --status                     Show Cygwin status
+    ` + exampleName + ` --status                     Show Cygwin + WSL status
+    ` + exampleName + ` --user alice                 Open shell as alice
+    ` + exampleName + ` --user alice --exec "whoami"  Run whoami as alice
     ` + exampleName + ` install vim                  Install vim package
     ` + exampleName + ` sudo nano /etc/hosts         Edit hosts file with admin rights
+    ` + exampleName + ` wsl --list                   List WSL distros
+    ` + exampleName + ` wsl --path "C:\Users\foo"    Show path in all three formats
+    ` + exampleName + ` wsl --exec Ubuntu -- uname -a  Run uname in Ubuntu distro
 `
 	fmt.Print(help)
 }
@@ -329,76 +397,23 @@ func showStatus() {
 	} else {
 		fmt.Println("  sudo: Installed")
 	}
+
+	// WSL status
+	fmt.Println()
+	fmt.Println("=== WSL Status ===")
+	fmt.Println()
+	distros, err := wslListDistros()
+	if err != nil {
+		fmt.Println("  WSL not available:", err)
+	} else {
+		printWslDistros(distros)
+	}
 }
 
+// ProcessInfo holds the PID and name of a running Cygwin process.
+// getCygwinProcesses and shutdownCygwin are implemented in the
+// platform-specific winapi_windows.go / winapi_other.go files.
 type ProcessInfo struct {
 	Pid  int
 	Name string
-}
-
-func getCygwinProcesses() []ProcessInfo {
-	// Use PowerShell to get Cygwin processes
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command",
-		"Get-Process | Where-Object { $_.Path -like '"+CygwinRoot+"\\*' } | Select-Object Id, ProcessName | ConvertTo-Json")
-	output, err := cmd.Output()
-	if err != nil {
-		return nil
-	}
-
-	var processes []ProcessInfo
-	// Parse JSON output
-	outStr := strings.TrimSpace(string(output))
-	if outStr == "" || outStr == "null" {
-		return nil
-	}
-
-	lines := strings.Split(outStr, "\n")
-	var currentPid int
-	var currentName string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		line = strings.TrimSuffix(line, ",")
-		if strings.Contains(line, `"Id"`) {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &currentPid)
-			}
-		}
-		if strings.Contains(line, `"ProcessName"`) {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				currentName = strings.Trim(strings.TrimSpace(parts[1]), `"`)
-			}
-		}
-		if currentPid > 0 && currentName != "" {
-			processes = append(processes, ProcessInfo{Pid: currentPid, Name: currentName})
-			currentPid = 0
-			currentName = ""
-		}
-	}
-	return processes
-}
-
-func shutdownCygwin() {
-	fmt.Println("Terminating Cygwin processes...")
-
-	// Use PowerShell to kill Cygwin processes
-	cmd := exec.Command("powershell.exe", "-NoProfile", "-Command",
-		"Get-Process | Where-Object { $_.Path -like '"+CygwinRoot+"\\*' } | Stop-Process -Force")
-	output, err := cmd.CombinedOutput()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: %s\n", output)
-		os.Exit(1)
-	}
-
-	// Count terminated processes
-	countCmd := exec.Command("powershell.exe", "-NoProfile", "-Command",
-		"@(Get-Process | Where-Object { $_.Path -like '"+CygwinRoot+"\\*' }).Count")
-	countOutput, _ := countCmd.Output()
-	count := strings.TrimSpace(string(countOutput))
-	if count == "0" {
-		fmt.Println("All Cygwin processes terminated")
-	} else {
-		fmt.Printf("%s process(es) still running\n", count)
-	}
 }
