@@ -160,6 +160,11 @@ func runInteractive(user string) {
 		}
 		cmd = exec.Command(SuCmd, user)
 	} else {
+		if _, err := os.Stat(BashExe); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error: Cygwin bash not found at", BashExe)
+			fmt.Fprintln(os.Stderr, "Please install Cygwin first (https://cygwin.com).")
+			os.Exit(2)
+		}
 		cmd = exec.Command(BashExe, "-i")
 	}
 	cmd.Stdin = os.Stdin
@@ -169,8 +174,14 @@ func runInteractive(user string) {
 		"LANG=zh_TW.UTF-8",
 		"LC_ALL=zh_TW.UTF-8",
 	)
-	cmd.Run()
-	os.Exit(cmd.ProcessState.ExitCode())
+	if err := cmd.Run(); err != nil {
+		if cmd.ProcessState != nil {
+			os.Exit(cmd.ProcessState.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func execCommand(command string, workingDir string, user string) {
@@ -183,6 +194,15 @@ func execCommand(command string, workingDir string, user string) {
 			fmt.Fprintln(os.Stderr, "Please build and install su.exe first (make su).")
 			os.Exit(2)
 		}
+	} else {
+		if _, err := os.Stat(BashExe); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error: Cygwin bash not found at", BashExe)
+			fmt.Fprintln(os.Stderr, "Please install Cygwin first (https://cygwin.com).")
+			os.Exit(2)
+		}
+	}
+
+	if user != "" {
 		if workingDir != "" {
 			cygPath := toCygwinPath(workingDir)
 			if command != "" {
@@ -218,8 +238,14 @@ func execCommand(command string, workingDir string, user string) {
 		"CYGWIN=winsymlinks:native",
 	)
 
-	cmd.Run()
-	os.Exit(cmd.ProcessState.ExitCode())
+	if err := cmd.Run(); err != nil {
+		if cmd.ProcessState != nil {
+			os.Exit(cmd.ProcessState.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // toCygwinPath converts a Windows path to a Cygwin POSIX path using a pure-Go

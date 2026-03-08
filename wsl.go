@@ -72,8 +72,15 @@ func wslInteractive(distro string) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
-	os.Exit(cmd.ProcessState.ExitCode())
+	if err := cmd.Run(); err != nil {
+		if cmd.ProcessState != nil {
+			os.Exit(cmd.ProcessState.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "Error: WSL is not available:", err)
+		fmt.Fprintln(os.Stderr, "Please enable WSL first (https://learn.microsoft.com/windows/wsl).")
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 // wslListDistros calls `wsl.exe --list --verbose` and parses the output.
