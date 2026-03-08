@@ -43,6 +43,7 @@ var opts struct {
 	NoDeps      bool
 	NoScripts   bool
 	AllowHollow bool
+	Yes         bool // --yes / -y: skip interactive confirmation prompts
 }
 
 // Essential packages that must not be removed
@@ -92,6 +93,8 @@ func main() {
 			opts.NoScripts = true
 		case "--allow-hollow":
 			opts.AllowHollow = true
+		case "--yes", "-y", "--assume-yes":
+			opts.Yes = true
 		default:
 			cleanArgs = append(cleanArgs, arg)
 		}
@@ -259,6 +262,7 @@ Commands:
   clean                  Delete cached package archives
 
 Options:
+  --yes, -y              Assume yes for all prompts (non-interactive / script mode)
   --nodeps               Skip dependency resolution
   --noscripts            Skip postinstall scripts
   --allow-hollow         Proceed even if archive appears to be a stub
@@ -1349,13 +1353,15 @@ func cmdAutoremove() {
 	sort.Strings(orphans)
 	fmt.Printf("The following %d package(s) are no longer needed:\n", len(orphans))
 	fmt.Printf("  %s\n", strings.Join(orphans, " "))
-	fmt.Print("Remove them? [y/N] ")
 
-	var answer string
-	fmt.Scanln(&answer)
-	if strings.ToLower(strings.TrimSpace(answer)) != "y" {
-		fmt.Println("Aborted.")
-		return
+	if !opts.Yes {
+		fmt.Print("Remove them? [y/N] ")
+		var answer string
+		fmt.Scanln(&answer)
+		if strings.ToLower(strings.TrimSpace(answer)) != "y" {
+			fmt.Println("Aborted.")
+			return
+		}
 	}
 
 	cmdRemove(orphans)
