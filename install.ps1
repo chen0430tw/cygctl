@@ -125,16 +125,21 @@ alias sudo='sudo.exe'
 alias su='su.exe'
 "@
 
+# Normalize to LF so bash on Git Bash / Cygwin doesn't see CRLF artifacts
+$bashAliasesLF = $bashAliases.Replace("`r`n", "`n")
+
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
     if ($content -match "MSYS_NO_PATHCONV") {
         Write-Host "  OK Aliases already exist" -ForegroundColor Gray
     } else {
-        Add-Content -Path $bashrcPath -Value $bashAliases
+        # Append with LF line endings using .NET to avoid PowerShell CRLF injection
+        $existing = [System.IO.File]::ReadAllText($bashrcPath)
+        [System.IO.File]::WriteAllText($bashrcPath, $existing + $bashAliasesLF)
         Write-Host "  OK Added aliases" -ForegroundColor Green
     }
 } else {
-    Set-Content -Path $bashrcPath -Value $bashAliases.TrimStart()
+    [System.IO.File]::WriteAllText($bashrcPath, $bashAliasesLF.TrimStart())
     Write-Host "  OK Created .bashrc" -ForegroundColor Green
 }
 
@@ -147,11 +152,12 @@ if (Test-Path (Split-Path $cygwinBashrc)) {
         if ($content -match "MSYS_NO_PATHCONV") {
             Write-Host "  OK Aliases already exist" -ForegroundColor Gray
         } else {
-            Add-Content -Path $cygwinBashrc -Value $bashAliases
+            $existing = [System.IO.File]::ReadAllText($cygwinBashrc)
+            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $bashAliasesLF)
             Write-Host "  OK Added aliases" -ForegroundColor Green
         }
     } else {
-        Set-Content -Path $cygwinBashrc -Value $bashAliases.TrimStart()
+        [System.IO.File]::WriteAllText($cygwinBashrc, $bashAliasesLF.TrimStart())
         Write-Host "  OK Created .bashrc" -ForegroundColor Green
     }
 } else {
