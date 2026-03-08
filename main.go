@@ -12,7 +12,7 @@ import (
 const (
 	// defaultCygwinRoot is used as fallback when the registry key is absent.
 	defaultCygwinRoot = `C:\cygwin64`
-	Version           = "1.2.0"
+	Version           = "1.2.1"
 )
 
 // Executable names for alias detection
