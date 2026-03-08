@@ -43,8 +43,11 @@ func findCygwinRoot() string {
 				if err != nil || val == "" {
 					continue
 				}
-				// Strip NT long path prefix if present
+				// Strip NT/Win32 long path prefixes if present:
+				// \\?\ = Win32 extended path prefix
+				// \??\ = NT namespace prefix (written by some Cygwin versions)
 				val = strings.TrimPrefix(val, `\\?\`)
+				val = strings.TrimPrefix(val, `\??\`)
 				return val
 			}
 			k.Close()
