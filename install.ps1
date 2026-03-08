@@ -115,17 +115,19 @@ $bashrcPath = "$env:USERPROFILE\.bashrc"
 $bashAliases = @"
 
 # Cygwin aliases
+# MSYS_NO_PATHCONV=1 prevents Git Bash from mangling Unix paths (e.g. / -> C:/Program Files/Git/)
+# before they reach cygctl / apt-cyg, which need to receive them verbatim.
+cyg()    { MSYS_NO_PATHCONV=1 cygctl.exe  "`$@"; }
+apt()    { MSYS_NO_PATHCONV=1 apt-cyg.exe "`$@"; }
 alias cygctl='cygctl.exe'
 alias apt-cyg='apt-cyg.exe'
 alias sudo='sudo.exe'
 alias su='su.exe'
-alias cyg='cygctl.exe'
-alias apt='apt-cyg.exe'
 "@
 
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
-    if ($content -match "alias cyg=") {
+    if ($content -match "MSYS_NO_PATHCONV") {
         Write-Host "  OK Aliases already exist" -ForegroundColor Gray
     } else {
         Add-Content -Path $bashrcPath -Value $bashAliases
@@ -142,7 +144,7 @@ $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
 if (Test-Path (Split-Path $cygwinBashrc)) {
     if (Test-Path $cygwinBashrc) {
         $content = Get-Content $cygwinBashrc -Raw
-        if ($content -match "alias cyg=") {
+        if ($content -match "MSYS_NO_PATHCONV") {
             Write-Host "  OK Aliases already exist" -ForegroundColor Gray
         } else {
             Add-Content -Path $cygwinBashrc -Value $bashAliases
