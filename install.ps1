@@ -125,21 +125,23 @@ alias sudo='sudo.exe'
 alias su='su.exe'
 "@
 
-# Normalize to LF so bash on Git Bash / Cygwin doesn't see CRLF artifacts
+# Normalize to LF so bash on Git Bash / Cygwin doesn't see CRLF artifacts.
+# Use UTF-8 without BOM — a BOM at the start of .bashrc causes bash to crash.
 $bashAliasesLF = $bashAliases.Replace("`r`n", "`n")
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
     if ($content -match "MSYS_NO_PATHCONV") {
         Write-Host "  OK Aliases already exist" -ForegroundColor Gray
     } else {
-        # Append with LF line endings using .NET to avoid PowerShell CRLF injection
+        # Append with LF line endings; re-write the whole file to guarantee encoding.
         $existing = [System.IO.File]::ReadAllText($bashrcPath)
-        [System.IO.File]::WriteAllText($bashrcPath, $existing + $bashAliasesLF)
+        [System.IO.File]::WriteAllText($bashrcPath, $existing + $bashAliasesLF, $utf8NoBom)
         Write-Host "  OK Added aliases" -ForegroundColor Green
     }
 } else {
-    [System.IO.File]::WriteAllText($bashrcPath, $bashAliasesLF.TrimStart())
+    [System.IO.File]::WriteAllText($bashrcPath, $bashAliasesLF.TrimStart(), $utf8NoBom)
     Write-Host "  OK Created .bashrc" -ForegroundColor Green
 }
 
@@ -153,11 +155,11 @@ if (Test-Path (Split-Path $cygwinBashrc)) {
             Write-Host "  OK Aliases already exist" -ForegroundColor Gray
         } else {
             $existing = [System.IO.File]::ReadAllText($cygwinBashrc)
-            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $bashAliasesLF)
+            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $bashAliasesLF, $utf8NoBom)
             Write-Host "  OK Added aliases" -ForegroundColor Green
         }
     } else {
-        [System.IO.File]::WriteAllText($cygwinBashrc, $bashAliasesLF.TrimStart())
+        [System.IO.File]::WriteAllText($cygwinBashrc, $bashAliasesLF.TrimStart(), $utf8NoBom)
         Write-Host "  OK Created .bashrc" -ForegroundColor Green
     }
 } else {
