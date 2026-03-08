@@ -11,7 +11,8 @@
 #>
 
 param(
-    [string]$InstallDir = "C:\cygwin64\bin"
+    [string]$InstallDir = "C:\cygwin64\bin",
+    [switch]$Verify
 )
 
 $ErrorActionPreference = "Stop"
@@ -50,9 +51,17 @@ $profilePath = $PROFILE
 if (Test-Path $profilePath) {
     $content = Get-Content $profilePath -Raw
     if ($content -match "function cyg") {
-        $newContent = $content -replace '(?s)\r?\n# Cygwin Command-Line Tool aliases.*', ''
-        Set-Content -Path $profilePath -Value $newContent -NoNewline
-        Write-Host "  OK Removed aliases" -ForegroundColor Green
+        # Remove the entire Cygwin aliases block (handles file start or after newline)
+        $newContent = $content -replace '(?s)(\r?\n)?# Cygwin Command-Line Tool aliases\r?\nfunction cyg \{ cygctl\.exe \$args \}\r?\nfunction apt \{ apt-cyg\.exe \$args \}\r?\n?', ''
+        # Also handle trailing newlines
+        $newContent = $newContent -replace '^\r?\n', ''
+        if ($newContent.Trim() -eq '') {
+            Remove-Item $profilePath -Force
+            Write-Host "  OK Removed profile (was only aliases)" -ForegroundColor Green
+        } else {
+            Set-Content -Path $profilePath -Value $newContent -NoNewline
+            Write-Host "  OK Removed aliases" -ForegroundColor Green
+        }
     } else {
         Write-Host "  OK No aliases found" -ForegroundColor Gray
     }
@@ -85,10 +94,16 @@ $bashrcPath = "$env:USERPROFILE\.bashrc"
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
     if ($content -match "# Cygwin aliases") {
-        # Remove the entire Cygwin aliases block (7 lines)
-        $newContent = $content -replace '(?s)\r?\n# Cygwin aliases\r?\nalias cygctl=.*\r?\nalias apt-cyg=.*\r?\nalias sudo=.*\r?\nalias su=.*\r?\nalias cyg=.*\r?\nalias apt=.*', ''
-        Set-Content -Path $bashrcPath -Value $newContent -NoNewline
-        Write-Host "  OK Removed aliases" -ForegroundColor Green
+        # Remove the entire Cygwin aliases block (handles file start or after newline)
+        $newContent = $content -replace '(?s)(\r?\n)?# Cygwin aliases\r?\nalias cygctl=''.*''\r?\nalias apt-cyg=''.*''\r?\nalias sudo=''.*''\r?\nalias su=''.*''\r?\nalias cyg=''.*''\r?\nalias apt=''.*''\r?\n?', ''
+        $newContent = $newContent -replace '^\r?\n', ''
+        if ($newContent.Trim() -eq '') {
+            Remove-Item $bashrcPath -Force
+            Write-Host "  OK Removed .bashrc (was only aliases)" -ForegroundColor Green
+        } else {
+            Set-Content -Path $bashrcPath -Value $newContent -NoNewline
+            Write-Host "  OK Removed aliases" -ForegroundColor Green
+        }
     } else {
         Write-Host "  OK No aliases found" -ForegroundColor Gray
     }
@@ -102,10 +117,16 @@ $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
 if (Test-Path $cygwinBashrc) {
     $content = Get-Content $cygwinBashrc -Raw
     if ($content -match "# Cygwin aliases") {
-        # Remove the entire Cygwin aliases block (7 lines)
-        $newContent = $content -replace '(?s)\r?\n# Cygwin aliases\r?\nalias cygctl=.*\r?\nalias apt-cyg=.*\r?\nalias sudo=.*\r?\nalias su=.*\r?\nalias cyg=.*\r?\nalias apt=.*', ''
-        Set-Content -Path $cygwinBashrc -Value $newContent -NoNewline
-        Write-Host "  OK Removed aliases" -ForegroundColor Green
+        # Remove the entire Cygwin aliases block (handles file start or after newline)
+        $newContent = $content -replace '(?s)(\r?\n)?# Cygwin aliases\r?\nalias cygctl=''.*''\r?\nalias apt-cyg=''.*''\r?\nalias sudo=''.*''\r?\nalias su=''.*''\r?\nalias cyg=''.*''\r?\nalias apt=''.*''\r?\n?', ''
+        $newContent = $newContent -replace '^\r?\n', ''
+        if ($newContent.Trim() -eq '') {
+            Remove-Item $cygwinBashrc -Force
+            Write-Host "  OK Removed .bashrc (was only aliases)" -ForegroundColor Green
+        } else {
+            Set-Content -Path $cygwinBashrc -Value $newContent -NoNewline
+            Write-Host "  OK Removed aliases" -ForegroundColor Green
+        }
     } else {
         Write-Host "  OK No aliases found" -ForegroundColor Gray
     }
@@ -116,5 +137,93 @@ if (Test-Path $cygwinBashrc) {
 # Done
 Write-Host ""
 Write-Host "=== Uninstall Complete ===" -ForegroundColor Green
+
+# Verification
+Write-Host ""
+Write-Host "=== Verification ===" -ForegroundColor Cyan
+
+$issues = @()
+
+# Check binaries
+foreach ($binary in $Binaries) {
+    $path = Join-Path $InstallDir $binary
+    if (Test-Path $path) {
+        $issues += "Binary still exists: $path"
+    }
+}
+if ($issues.Count -eq 0 -or -not ($issues | Where-Object { $_ -like "Binary*" })) {
+    Write-Host "  [OK] Binaries removed" -ForegroundColor Green
+}
+
+# Check PATH
+$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
+if ($userPath -like "*$InstallDir*") {
+    $issues += "PATH still contains: $InstallDir"
+    Write-Host "  [FAIL] PATH still contains cygwin" -ForegroundColor Red
+} else {
+    Write-Host "  [OK] PATH clean" -ForegroundColor Green
+}
+
+# Check PowerShell profile
+$profilePath = $PROFILE
+if (Test-Path $profilePath) {
+    $content = Get-Content $profilePath -Raw
+    if ($content -match "function cyg") {
+        $issues += "PowerShell profile still has aliases"
+        Write-Host "  [FAIL] PowerShell profile still has aliases" -ForegroundColor Red
+    } else {
+        Write-Host "  [OK] PowerShell profile clean" -ForegroundColor Green
+    }
+} else {
+    Write-Host "  [OK] PowerShell profile clean (no file)" -ForegroundColor Green
+}
+
+# Check CMD macros
+$macrosFile = "$env:USERPROFILE\cmd_macros.doskey"
+if (Test-Path $macrosFile) {
+    $issues += "CMD macros file still exists"
+    Write-Host "  [FAIL] CMD macros file still exists" -ForegroundColor Red
+} else {
+    Write-Host "  [OK] CMD macros clean" -ForegroundColor Green
+}
+
+# Check Git Bash
+$bashrcPath = "$env:USERPROFILE\.bashrc"
+if (Test-Path $bashrcPath) {
+    $content = Get-Content $bashrcPath -Raw
+    if ($content -match "alias cyg=") {
+        $issues += "Git Bash .bashrc still has aliases"
+        Write-Host "  [FAIL] Git Bash .bashrc still has aliases" -ForegroundColor Red
+    } else {
+        Write-Host "  [OK] Git Bash .bashrc clean" -ForegroundColor Green
+    }
+} else {
+    Write-Host "  [OK] Git Bash .bashrc clean (no file)" -ForegroundColor Green
+}
+
+# Check Cygwin
+$cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
+if (Test-Path $cygwinBashrc) {
+    $content = Get-Content $cygwinBashrc -Raw
+    if ($content -match "alias cyg=") {
+        $issues += "Cygwin .bashrc still has aliases"
+        Write-Host "  [FAIL] Cygwin .bashrc still has aliases" -ForegroundColor Red
+    } else {
+        Write-Host "  [OK] Cygwin .bashrc clean" -ForegroundColor Green
+    }
+} else {
+    Write-Host "  [OK] Cygwin .bashrc clean (no file)" -ForegroundColor Green
+}
+
+Write-Host ""
+if ($issues.Count -eq 0) {
+    Write-Host "All clean!" -ForegroundColor Green
+} else {
+    Write-Host "Issues found:" -ForegroundColor Yellow
+    foreach ($issue in $issues) {
+        Write-Host "  - $issue" -ForegroundColor Yellow
+    }
+}
+
 Write-Host ""
 Write-Host "NOTE: Restart your terminal for changes to take effect." -ForegroundColor Yellow
