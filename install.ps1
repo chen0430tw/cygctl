@@ -115,6 +115,10 @@ $bashrcPath = "$env:USERPROFILE\.bashrc"
 $bashAliases = @"
 
 # Cygwin aliases
+alias cygctl='cygctl.exe'
+alias apt-cyg='apt-cyg.exe'
+alias sudo='sudo.exe'
+alias su='su.exe'
 alias cyg='cygctl.exe'
 alias apt='apt-cyg.exe'
 "@
