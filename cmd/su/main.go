@@ -15,7 +15,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 	"unsafe"
 
@@ -366,7 +365,7 @@ func lookupUserDomain(username string) (string, error) {
 		uintptr(unsafe.Pointer(&use)),
 	)
 	if ret == 0 {
-		if lerr == syscall.ERROR_NONE_MAPPED {
+		if lerr == windows.ERROR_NONE_MAPPED {
 			return "", fmt.Errorf("no such user")
 		}
 		return "", fmt.Errorf("lookup failed: %v", lerr)
