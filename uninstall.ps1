@@ -88,27 +88,48 @@ if ($autoRun -and $autoRun.AutoRun -like '*cmd_macros*') {
     Write-Host "  OK No AutoRun configured" -ForegroundColor Gray
 }
 
-# 5. Remove Git Bash aliases
-Write-Host "[5/6] Cleaning Git Bash..." -ForegroundColor Green
+# 5. Remove shell aliases (~/.bash_env, BASH_ENV env var, source line in ~/.bashrc)
+Write-Host "[5/6] Cleaning shell aliases..." -ForegroundColor Green
+
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+
+# Remove ~/.bash_env
+$bashEnvPath = "$env:USERPROFILE\.bash_env"
+if (Test-Path $bashEnvPath) {
+    Remove-Item $bashEnvPath -Force
+    Write-Host "  OK Removed ~/.bash_env" -ForegroundColor Green
+} else {
+    Write-Host "  OK ~/.bash_env not found" -ForegroundColor Gray
+}
+
+# Unset BASH_ENV (only if we set it — check it points to our file)
+$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "User")
+if ($currentBashEnv -like "*\.bash_env") {
+    [Environment]::SetEnvironmentVariable("BASH_ENV", $null, "User")
+    Write-Host "  OK Cleared BASH_ENV" -ForegroundColor Green
+} else {
+    Write-Host "  OK BASH_ENV not set by us" -ForegroundColor Gray
+}
+
+# Remove source line from ~/.bashrc
 $bashrcPath = "$env:USERPROFILE\.bashrc"
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
-    if ($content -match "# Cygwin aliases") {
-        # Remove the entire Cygwin aliases block (handles file start or after newline)
-        $newContent = $content -replace '(?s)(\r?\n)?# Cygwin aliases\r?\nalias cygctl=''.*''\r?\nalias apt-cyg=''.*''\r?\nalias sudo=''.*''\r?\nalias su=''.*''\r?\nalias cyg=''.*''\r?\nalias apt=''.*''\r?\n?', ''
+    if ($content -match "\.bash_env") {
+        $newContent = $content -replace '(?s)(\r?\n)?# Load Cygwin aliases[^\n]*\r?\n\[ -f "[^"]*\.bash_env" \] && source "[^"]*\.bash_env"\r?\n?', ''
         $newContent = $newContent -replace '^\r?\n', ''
         if ($newContent.Trim() -eq '') {
             Remove-Item $bashrcPath -Force
-            Write-Host "  OK Removed .bashrc (was only aliases)" -ForegroundColor Green
+            Write-Host "  OK Removed ~/.bashrc (was only aliases)" -ForegroundColor Green
         } else {
-            Set-Content -Path $bashrcPath -Value $newContent -NoNewline
-            Write-Host "  OK Removed aliases" -ForegroundColor Green
+            [System.IO.File]::WriteAllText($bashrcPath, $newContent, $utf8NoBom)
+            Write-Host "  OK Patched ~/.bashrc" -ForegroundColor Green
         }
     } else {
-        Write-Host "  OK No aliases found" -ForegroundColor Gray
+        Write-Host "  OK ~/.bashrc has no cygctl entries" -ForegroundColor Gray
     }
 } else {
-    Write-Host "  OK No .bashrc found" -ForegroundColor Gray
+    Write-Host "  OK ~/.bashrc not found" -ForegroundColor Gray
 }
 
 # 6. Remove Cygwin bash aliases
@@ -116,19 +137,18 @@ Write-Host "[6/6] Cleaning Cygwin..." -ForegroundColor Green
 $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
 if (Test-Path $cygwinBashrc) {
     $content = Get-Content $cygwinBashrc -Raw
-    if ($content -match "# Cygwin aliases") {
-        # Remove the entire Cygwin aliases block (handles file start or after newline)
-        $newContent = $content -replace '(?s)(\r?\n)?# Cygwin aliases\r?\nalias cygctl=''.*''\r?\nalias apt-cyg=''.*''\r?\nalias sudo=''.*''\r?\nalias su=''.*''\r?\nalias cyg=''.*''\r?\nalias apt=''.*''\r?\n?', ''
+    if ($content -match "\.bash_env") {
+        $newContent = $content -replace '(?s)(\r?\n)?# Load Cygwin aliases[^\n]*\r?\n\[ -f "[^"]*\.bash_env" \] && source "[^"]*\.bash_env"\r?\n?', ''
         $newContent = $newContent -replace '^\r?\n', ''
         if ($newContent.Trim() -eq '') {
             Remove-Item $cygwinBashrc -Force
-            Write-Host "  OK Removed .bashrc (was only aliases)" -ForegroundColor Green
+            Write-Host "  OK Removed Cygwin ~/.bashrc (was only aliases)" -ForegroundColor Green
         } else {
-            Set-Content -Path $cygwinBashrc -Value $newContent -NoNewline
-            Write-Host "  OK Removed aliases" -ForegroundColor Green
+            [System.IO.File]::WriteAllText($cygwinBashrc, $newContent, $utf8NoBom)
+            Write-Host "  OK Patched Cygwin ~/.bashrc" -ForegroundColor Green
         }
     } else {
-        Write-Host "  OK No aliases found" -ForegroundColor Gray
+        Write-Host "  OK Cygwin ~/.bashrc has no cygctl entries" -ForegroundColor Gray
     }
 } else {
     Write-Host "  SKIP Cygwin .bashrc not found" -ForegroundColor Gray
@@ -187,13 +207,31 @@ if (Test-Path $macrosFile) {
     Write-Host "  [OK] CMD macros clean" -ForegroundColor Green
 }
 
-# Check Git Bash
+# Check ~/.bash_env removed
+$bashEnvPath = "$env:USERPROFILE\.bash_env"
+if (Test-Path $bashEnvPath) {
+    $issues += "~/.bash_env still exists"
+    Write-Host "  [FAIL] ~/.bash_env still exists" -ForegroundColor Red
+} else {
+    Write-Host "  [OK] ~/.bash_env removed" -ForegroundColor Green
+}
+
+# Check BASH_ENV cleared
+$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "User")
+if ($currentBashEnv -like "*\.bash_env") {
+    $issues += "BASH_ENV still points to cygctl file"
+    Write-Host "  [FAIL] BASH_ENV not cleared" -ForegroundColor Red
+} else {
+    Write-Host "  [OK] BASH_ENV clear" -ForegroundColor Green
+}
+
+# Check Git Bash ~/.bashrc
 $bashrcPath = "$env:USERPROFILE\.bashrc"
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
-    if ($content -match "alias cyg=") {
-        $issues += "Git Bash .bashrc still has aliases"
-        Write-Host "  [FAIL] Git Bash .bashrc still has aliases" -ForegroundColor Red
+    if ($content -match "\.bash_env") {
+        $issues += "Git Bash .bashrc still references .bash_env"
+        Write-Host "  [FAIL] Git Bash .bashrc still references .bash_env" -ForegroundColor Red
     } else {
         Write-Host "  [OK] Git Bash .bashrc clean" -ForegroundColor Green
     }
@@ -201,13 +239,13 @@ if (Test-Path $bashrcPath) {
     Write-Host "  [OK] Git Bash .bashrc clean (no file)" -ForegroundColor Green
 }
 
-# Check Cygwin
+# Check Cygwin ~/.bashrc
 $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
 if (Test-Path $cygwinBashrc) {
     $content = Get-Content $cygwinBashrc -Raw
-    if ($content -match "alias cyg=") {
-        $issues += "Cygwin .bashrc still has aliases"
-        Write-Host "  [FAIL] Cygwin .bashrc still has aliases" -ForegroundColor Red
+    if ($content -match "\.bash_env") {
+        $issues += "Cygwin .bashrc still references .bash_env"
+        Write-Host "  [FAIL] Cygwin .bashrc still references .bash_env" -ForegroundColor Red
     } else {
         Write-Host "  [OK] Cygwin .bashrc clean" -ForegroundColor Green
     }
