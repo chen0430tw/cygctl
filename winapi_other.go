@@ -3,6 +3,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,34 +25,26 @@ func getCygwinProcesses() []ProcessInfo {
 		return nil
 	}
 
-	var processes []ProcessInfo
-	outStr := strings.TrimSpace(string(output))
-	if outStr == "" || outStr == "null" {
-		return nil
+	type psEntry struct {
+		Id          int    `json:"Id"`
+		ProcessName string `json:"ProcessName"`
 	}
 
-	lines := strings.Split(outStr, "\n")
-	var currentPid int
-	var currentName string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		line = strings.TrimSuffix(line, ",")
-		if strings.Contains(line, `"Id"`) {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &currentPid)
-			}
+	// ConvertTo-Json emits an object (not array) when there is only one result.
+	// Try array first, then fall back to single object.
+	var entries []psEntry
+	if err := json.Unmarshal(output, &entries); err != nil {
+		var single psEntry
+		if err := json.Unmarshal(output, &single); err != nil || single.Id == 0 {
+			return nil
 		}
-		if strings.Contains(line, `"ProcessName"`) {
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				currentName = strings.Trim(strings.TrimSpace(parts[1]), `"`)
-			}
-		}
-		if currentPid > 0 && currentName != "" {
-			processes = append(processes, ProcessInfo{Pid: currentPid, Name: currentName})
-			currentPid = 0
-			currentName = ""
+		entries = []psEntry{single}
+	}
+
+	var processes []ProcessInfo
+	for _, e := range entries {
+		if e.Id > 0 && e.ProcessName != "" {
+			processes = append(processes, ProcessInfo{Pid: e.Id, Name: e.ProcessName})
 		}
 	}
 	return processes

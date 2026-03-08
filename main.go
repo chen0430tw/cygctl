@@ -204,7 +204,7 @@ func execCommand(command string, workingDir string, user string) {
 
 	if user != "" {
 		if workingDir != "" {
-			cygPath := toCygwinPath(workingDir)
+			cygPath := winToCygwin(workingDir)
 			if command != "" {
 				cmd = exec.Command(SuCmd, user, fmt.Sprintf("cd '%s' && %s", cygPath, command))
 			} else {
@@ -218,7 +218,7 @@ func execCommand(command string, workingDir string, user string) {
 			}
 		}
 	} else if workingDir != "" {
-		cygPath := toCygwinPath(workingDir)
+		cygPath := winToCygwin(workingDir)
 		if command != "" {
 			cmd = exec.Command(BashExe, "--login", "-c", fmt.Sprintf("cd '%s' && %s", cygPath, command))
 		} else {
@@ -248,23 +248,6 @@ func execCommand(command string, workingDir string, user string) {
 	os.Exit(0)
 }
 
-// toCygwinPath converts a Windows path to a Cygwin POSIX path using a pure-Go
-// implementation.  This avoids spawning cygpath.exe as a subprocess.
-// For the rare cases where a custom cygdrive prefix is configured in
-// /etc/fstab the user-space default "/cygdrive" is used, which covers nearly
-// all Cygwin installations.
-func toCygwinPath(winPath string) string {
-	// Normalise backslashes
-	p := strings.ReplaceAll(winPath, `\`, "/")
-
-	// Drive letter conversion: C:/... → /cygdrive/c/...
-	if len(p) >= 2 && p[1] == ':' {
-		p = "/cygdrive/" + strings.ToLower(string(p[0])) + p[2:]
-	}
-	return p
-}
-
-
 func runAptCyg(args []string) {
 	if _, err := os.Stat(AptCyg); os.IsNotExist(err) {
 		fmt.Fprintln(os.Stderr, "Error: apt-cyg not found at", AptCyg)
@@ -276,8 +259,14 @@ func runAptCyg(args []string) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
-	os.Exit(cmd.ProcessState.ExitCode())
+	if err := cmd.Run(); err != nil {
+		if cmd.ProcessState != nil {
+			os.Exit(cmd.ProcessState.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func runSudo(args []string) {
@@ -291,8 +280,14 @@ func runSudo(args []string) {
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-	cmd.Run()
-	os.Exit(cmd.ProcessState.ExitCode())
+	if err := cmd.Run(); err != nil {
+		if cmd.ProcessState != nil {
+			os.Exit(cmd.ProcessState.ExitCode())
+		}
+		fmt.Fprintln(os.Stderr, "Error:", err)
+		os.Exit(1)
+	}
+	os.Exit(0)
 }
 
 func showHelp(exeName string) {
