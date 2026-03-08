@@ -12,36 +12,43 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
-// findCygwinRoot returns the Cygwin installation root by checking three
+// findCygwinRoot returns the Cygwin installation root by checking several
 // locations in priority order:
 //
-//  1. HKCU\SOFTWARE\Cygwin\Installations  (modern multi-install key, user scope)
-//  2. HKLM\SOFTWARE\Cygwin\Installations  (modern multi-install key, machine scope)
-//  3. HKLM\SOFTWARE\Cygwin\setup → rootdir (legacy setup.exe key)
-//  4. Compile-time default (C:\cygwin64)
+//  1. HKCU\SOFTWARE\Cygwin\Installations           (modern key, user scope, 64-bit)
+//  2. HKCU\SOFTWARE\WOW6432Node\Cygwin\Installations (modern key, user scope, 32-bit)
+//  3. HKLM\SOFTWARE\Cygwin\Installations           (modern key, machine scope, 64-bit)
+//  4. HKLM\SOFTWARE\WOW6432Node\Cygwin\Installations (modern key, machine scope, 32-bit)
+//  5. HKLM\SOFTWARE\Cygwin\setup → rootdir         (legacy setup.exe key)
+//  6. HKLM\SOFTWARE\WOW6432Node\Cygwin\setup       (legacy key, 32-bit Cygwin)
+//  7. Compile-time default (C:\cygwin64)
 func findCygwinRoot() string {
 	// 1 & 2: Modern Installations key (written by every Cygwin since ~2016).
 	// Values are named by a 64-bit hash of cygwin1.dll's path; the data is
 	// the installation root, optionally prefixed with "\\?\" (NT long path).
 	for _, root := range []registry.Key{registry.CURRENT_USER, registry.LOCAL_MACHINE} {
-		k, err := registry.OpenKey(root,
+		for _, subkey := range []string{
 			`SOFTWARE\Cygwin\Installations`,
-			registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS)
-		if err != nil {
-			continue
-		}
-		names, _ := k.ReadValueNames(-1)
-		for _, name := range names {
-			val, _, err := k.GetStringValue(name)
-			k.Close()
-			if err != nil || val == "" {
+			`SOFTWARE\WOW6432Node\Cygwin\Installations`, // 32-bit Cygwin on 64-bit Windows
+		} {
+			k, err := registry.OpenKey(root, subkey,
+				registry.QUERY_VALUE|registry.ENUMERATE_SUB_KEYS)
+			if err != nil {
 				continue
 			}
-			// Strip NT long path prefix if present
-			val = strings.TrimPrefix(val, `\\?\`)
-			return val
+			names, _ := k.ReadValueNames(-1)
+			for _, name := range names {
+				val, _, err := k.GetStringValue(name)
+				k.Close()
+				if err != nil || val == "" {
+					continue
+				}
+				// Strip NT long path prefix if present
+				val = strings.TrimPrefix(val, `\\?\`)
+				return val
+			}
+			k.Close()
 		}
-		k.Close()
 	}
 
 	// 3: Legacy setup.exe key (still written by the official Cygwin installer).
@@ -101,20 +108,54 @@ func getCygwinProcesses() []ProcessInfo {
 	return result
 }
 
+var (
+	modPsapi                    = windows.NewLazySystemDLL("psapi.dll")
+	procGetProcessImageFileName = modPsapi.NewProc("GetProcessImageFileNameW")
+)
+
 // queryProcessImagePath returns the full executable path of a process.
+// Uses GetProcessImageFileName (XP+) instead of QueryFullProcessImageName
+// (Vista+) for broader compatibility.
 func queryProcessImagePath(pid uint32) (string, error) {
-	h, err := windows.OpenProcess(windows.PROCESS_QUERY_LIMITED_INFORMATION, false, pid)
+	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, pid)
 	if err != nil {
 		return "", err
 	}
 	defer windows.CloseHandle(h)
 
 	var buf [windows.MAX_PATH]uint16
-	size := uint32(len(buf))
-	if err := windows.QueryFullProcessImageName(h, 0, &buf[0], &size); err != nil {
+	r, _, err := procGetProcessImageFileName.Call(
+		uintptr(h),
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(len(buf)),
+	)
+	if r == 0 {
 		return "", err
 	}
-	return windows.UTF16ToString(buf[:size]), nil
+	ntPath := windows.UTF16ToString(buf[:r])
+	return devicePathToWin32(ntPath), nil
+}
+
+// devicePathToWin32 converts an NT device path (e.g. \Device\HarddiskVolume1\foo.exe)
+// to a Win32 drive-letter path (e.g. C:\foo.exe) using QueryDosDevice.
+func devicePathToWin32(ntPath string) string {
+	for c := 'A'; c <= 'Z'; c++ {
+		drive := string(c) + ":"
+		drivePtr, err := windows.UTF16PtrFromString(drive)
+		if err != nil {
+			continue
+		}
+		var devBuf [windows.MAX_PATH]uint16
+		n, err := windows.QueryDosDevice(drivePtr, &devBuf[0], uint32(len(devBuf)))
+		if err != nil || n == 0 {
+			continue
+		}
+		devPath := windows.UTF16ToString(devBuf[:n])
+		if strings.HasPrefix(ntPath, devPath+`\`) {
+			return drive + ntPath[len(devPath):]
+		}
+	}
+	return ntPath // fallback: return NT path as-is
 }
 
 // shutdownCygwin terminates all Cygwin processes atomically using a Job Object.

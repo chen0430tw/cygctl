@@ -1,5 +1,10 @@
 # cygctl
 
+> [!IMPORTANT]
+> **cygctl does NOT install, download, or set up Cygwin or WSL.**
+> It is a control tool for running commands inside an **already-installed Cygwin environment**, with a WSL-like interface.
+> To install Cygwin, visit [cygwin.com](https://www.cygwin.com). To install WSL, see the [Microsoft documentation](https://learn.microsoft.com/windows/wsl/install).
+
 A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 
 ## Features
