@@ -47,6 +47,19 @@ Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/dow
 
 ## Usage
 
+### WSL Command Equivalents
+
+If you're familiar with WSL, here's how commands map to `cyg`:
+
+| WSL | cyg |
+|-----|-----|
+| `wsl` | `cyg` |
+| `wsl ls -la /tmp` | `cyg ls -la /tmp` |
+| `wsl -e ls -la` | `cyg --exec "ls -la"` |
+| `wsl --cd "D:\Projects" -e pwd` | `cyg --cd "D:\Projects" --exec "pwd"` |
+| `wsl --shutdown` | `cyg --shutdown` |
+| `wsl --status` | `cyg --status` |
+
 ### Basic Commands
 
 ```bash
