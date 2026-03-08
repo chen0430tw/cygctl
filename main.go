@@ -376,7 +376,7 @@ func showVersion(exeName string) {
 	if err == nil {
 		lines := strings.Split(string(output), "\n")
 		if len(lines) > 0 {
-			fmt.Printf("Bash: %s\n", lines[0])
+			fmt.Printf("Bash: %s\n", strings.TrimRight(lines[0], "\r"))
 		}
 	}
 }
@@ -392,7 +392,7 @@ func showStatus() {
 	if err == nil {
 		lines := strings.Split(string(output), "\n")
 		if len(lines) > 0 {
-			fmt.Printf("Bash Version: %s\n", lines[0])
+			fmt.Printf("Bash Version: %s\n", strings.TrimRight(lines[0], "\r"))
 		}
 	}
 
