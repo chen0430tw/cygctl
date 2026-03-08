@@ -181,6 +181,40 @@ cyg --help      # Show help
 | `clean` | Clear package cache |
 | `mirror [url]` | Set or show mirror |
 
+## Usage in AI Agents and Scripts
+
+`cyg` and `apt` work in **non-interactive shells** — `bash -c`, subprocesses, pipes, and AI agent tool environments (Claude Code, Cursor, etc.) — without any extra flags.
+
+```bash
+# All of these work after installation, even without -i
+bash -c 'cyg ls -la /tmp'
+bash -c 'apt install vim'
+echo 'cyg ls /' | bash
+```
+
+**Why it works:** Bash loads `.bashrc` only in interactive sessions. For non-interactive shells, Bash respects the `BASH_ENV` environment variable and sources whatever file it points to. The installer:
+
+1. Writes the `cyg`/`apt` functions to `~/.bash_env` (no interactive-only guard)
+2. Sets `BASH_ENV=%USERPROFILE%\.bash_env` as a Windows user environment variable
+
+Git Bash inherits Windows user env vars, so every new bash process — interactive or not — automatically loads the aliases.
+
+> [!NOTE]
+> `BASH_ENV` takes effect for **new** processes. If your shell was already open when you ran the installer, open a new terminal window.
+
+**Manual setup (if you installed binaries without the script):**
+
+```powershell
+# PowerShell — create ~/.bash_env and configure BASH_ENV
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$bashEnvContent = @'
+cyg()    { MSYS_NO_PATHCONV=1 cygctl.exe  "$@"; }
+apt()    { MSYS_NO_PATHCONV=1 apt-cyg.exe "$@"; }
+'@
+[System.IO.File]::WriteAllText("$env:USERPROFILE\.bash_env", $bashEnvContent, $utf8NoBom)
+[Environment]::SetEnvironmentVariable("BASH_ENV", "$env:USERPROFILE\.bash_env", "User")
+```
+
 ## install.ps1
 
 The installer script configures:
@@ -189,8 +223,8 @@ The installer script configures:
 2. **PATH** - Adds `C:\cygwin64\bin` to user PATH
 3. **PowerShell** - Creates `cyg` and `apt` functions
 4. **CMD** - Creates doskey macros with AutoRun
-5. **Git Bash** - Adds aliases to `.bashrc`
-6. **Cygwin** - Adds aliases to `.bashrc`
+5. **Shell aliases** - Writes `~/.bash_env` with `cyg`/`apt` functions, sets `BASH_ENV` Windows env var, and patches `~/.bashrc` to source it (enables both interactive and non-interactive shells)
+6. **Cygwin** - Patches Cygwin `~/.bashrc` to source `~/.bash_env`
 
 ## Building
 

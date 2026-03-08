@@ -181,6 +181,40 @@ cyg --help      # 显示帮助
 | `clean` | 清除包缓存 |
 | `mirror [url]` | 设置或显示镜像源 |
 
+## 在 AI Agent 和脚本中使用
+
+安装完成后，`cyg` 和 `apt` 在**非交互式 Shell** 中也能直接使用 —— 包括 `bash -c`、子进程、管道，以及各类 AI Agent 工具环境（Claude Code、Cursor 等）。
+
+```bash
+# 以下用法安装后均可直接使用，无需 -i 参数
+bash -c 'cyg ls -la /tmp'
+bash -c 'apt install vim'
+echo 'cyg ls /' | bash
+```
+
+**原理：** Bash 只在交互式会话中加载 `.bashrc`。对于非交互式 Shell，Bash 会读取环境变量 `BASH_ENV` 并 source 其指向的文件。安装器会：
+
+1. 将 `cyg`/`apt` 函数写入 `~/.bash_env`（不含任何交互式 guard）
+2. 将 `BASH_ENV=%USERPROFILE%\.bash_env` 写入 Windows 用户环境变量
+
+Git Bash 会继承 Windows 用户环境变量，因此每一个新的 bash 进程 —— 无论交互式还是非交互式 —— 都会自动加载这些 alias。
+
+> [!NOTE]
+> `BASH_ENV` 仅对**新启动**的进程生效。如果你的终端在安装前已经打开，请重新开一个终端窗口。
+
+**手动配置（未使用安装脚本时）：**
+
+```powershell
+# PowerShell — 手动创建 ~/.bash_env 并配置 BASH_ENV
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+$bashEnvContent = @'
+cyg()    { MSYS_NO_PATHCONV=1 cygctl.exe  "$@"; }
+apt()    { MSYS_NO_PATHCONV=1 apt-cyg.exe "$@"; }
+'@
+[System.IO.File]::WriteAllText("$env:USERPROFILE\.bash_env", $bashEnvContent, $utf8NoBom)
+[Environment]::SetEnvironmentVariable("BASH_ENV", "$env:USERPROFILE\.bash_env", "User")
+```
+
 ## install.ps1
 
 安装脚本会自动配置：
@@ -189,8 +223,8 @@ cyg --help      # 显示帮助
 2. **PATH** - 将 `C:\cygwin64\bin` 加入用户 PATH
 3. **PowerShell** - 创建 `cyg` 和 `apt` 函数
 4. **CMD** - 使用 AutoRun 创建 doskey 宏
-5. **Git Bash** - 在 `.bashrc` 中添加别名
-6. **Cygwin** - 在 `.bashrc` 中添加别名
+5. **Shell 别名** - 将 `cyg`/`apt` 函数写入 `~/.bash_env`，设置 `BASH_ENV` Windows 环境变量，并在 `~/.bashrc` 中添加 source 语句（交互式和非交互式 Shell 均可用）
+6. **Cygwin** - 在 Cygwin 的 `~/.bashrc` 中添加 source 语句
 
 ## 构建
 
