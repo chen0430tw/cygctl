@@ -1,9 +1,9 @@
 # cygctl
 
 > [!IMPORTANT]
-> **cygctl 不會安裝、下載或管理 Cygwin 或 WSL 本身。**
-> 它是一個讓你在**已安裝的 Cygwin 環境**中執行指令的控制工具，類似 WSL 的操作介面。
-> 若你需要安裝 Cygwin，請前往 [cygwin.com](https://www.cygwin.com)；若需要安裝 WSL，請參閱 [Microsoft 官方文件](https://learn.microsoft.com/windows/wsl/install)。
+> **cygctl does NOT install, download, or set up Cygwin or WSL.**
+> It is a control tool for running commands inside an **already-installed Cygwin environment**, with a WSL-like interface.
+> To install Cygwin, visit [cygwin.com](https://www.cygwin.com). To install WSL, see the [Microsoft documentation](https://learn.microsoft.com/windows/wsl/install).
 
 A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 
