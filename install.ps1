@@ -34,7 +34,7 @@ $BaseUrl = if ($Version -eq "latest") {
     "https://github.com/chen0430tw/cygctl/releases/download/$Version"
 }
 
-$Binaries = @("cygctl.exe", "apt-cyg.exe", "sudo.exe")
+$Binaries = @("cygctl.exe", "apt-cyg.exe", "sudo.exe", "su.exe")
 
 # 1. Download binaries
 Write-Host "[1/6] Downloading binaries..." -ForegroundColor Green
@@ -160,6 +160,7 @@ Write-Host "Installed commands:" -ForegroundColor Cyan
 Write-Host "  cygctl  - Cygwin CLI tool"
 Write-Host "  apt-cyg - Package manager"
 Write-Host "  sudo    - UAC elevation"
+Write-Host "  su      - Switch Windows user (requires Secondary Logon service)"
 Write-Host ""
 Write-Host "Aliases:" -ForegroundColor Cyan
 Write-Host "  cyg -> cygctl"

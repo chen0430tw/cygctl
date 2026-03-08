@@ -11,6 +11,7 @@ A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
 - **Exit code propagation** - Correct exit codes for scripting
 - **Package management** - apt-cyg rewritten in Go
 - **UAC elevation** - sudo for Windows admin tasks
+- **User switching** - su for switching between Windows user accounts
 
 ## Quick Install
 
@@ -29,6 +30,7 @@ $bin = "C:\cygwin64\bin"
 Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/cygctl.exe" -OutFile "$bin\cygctl.exe"
 Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/apt-cyg.exe" -OutFile "$bin\apt-cyg.exe"
 Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/sudo.exe" -OutFile "$bin\sudo.exe"
+Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/download/su.exe" -OutFile "$bin\su.exe"
 
 # Add to PATH
 [Environment]::SetEnvironmentVariable("PATH", "$bin;" + [Environment]::GetEnvironmentVariable("PATH", "User"), "User")
@@ -41,6 +43,7 @@ Invoke-WebRequest -Uri "https://github.com/chen0430tw/cygctl/releases/latest/dow
 | `cygctl.exe` | Main CLI tool |
 | `apt-cyg.exe` | Package manager |
 | `sudo.exe` | UAC elevation |
+| `su.exe` | Switch Windows user (via `CreateProcessWithLogonW`) |
 
 ## Usage
 
@@ -98,6 +101,25 @@ sudo netstat -an
 # Edit protected files
 sudo notepad C:\Windows\System32\drivers\etc\hosts
 ```
+
+### Su (Switch User)
+
+```bash
+# Open an interactive login shell as another Windows user
+cyg --user alice
+su alice
+
+# Run a single command as another user
+cyg --user alice --exec "whoami"
+su alice whoami
+
+# Change directory then open shell as another user
+cyg --user alice --cd "D:\Projects"
+```
+
+> **Note:** `su` uses `CreateProcessWithLogonW` and requires the Windows
+> Secondary Logon service (`seclogon`) to be running.  It is enabled by
+> default on all modern Windows versions.
 
 ### Status and Management
 
