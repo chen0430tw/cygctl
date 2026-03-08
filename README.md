@@ -134,6 +134,42 @@ cyg --user alice --cd "D:\Projects"
 > Secondary Logon service (`seclogon`) to be running.  It is enabled by
 > default on all modern Windows versions.
 
+### WSL Integration (cyg wsl)
+
+`cyg wsl` lets you manage and interact with WSL from within Cygwin.
+
+```bash
+# Launch default WSL distro interactively
+cyg wsl
+
+# List all WSL distributions with state and version
+cyg wsl --list
+
+# Convert a path between Windows / Cygwin / WSL formats
+cyg wsl --path "C:\Users\alice"
+cyg wsl --path /cygdrive/c/Users/alice
+cyg wsl --path /mnt/c/Users/alice
+# Output: windows=C:\Users\alice
+#         cygwin=/cygdrive/c/Users/alice
+#         wsl=/mnt/c/Users/alice
+
+# Run a command in the default WSL distro
+cyg wsl --exec -- ls -la /tmp
+
+# Run a command in a specific WSL distro
+cyg wsl --exec Ubuntu -- whoami
+
+# Shutdown all WSL VMs
+cyg wsl --shutdown
+```
+
+| Option | Alias | Description |
+|--------|-------|-------------|
+| `--list` | `-l` | List distros with name, state, and WSL version |
+| `--path <path>` | `-p` | Convert path to Windows / Cygwin / WSL formats |
+| `--exec [distro] -- <cmd>` | `-e` | Run command in distro (default if omitted) |
+| `--shutdown` | | Shut down all WSL2 VMs |
+
 ### Status and Management
 
 ```bash
