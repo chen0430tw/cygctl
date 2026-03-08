@@ -85,7 +85,8 @@ $bashrcPath = "$env:USERPROFILE\.bashrc"
 if (Test-Path $bashrcPath) {
     $content = Get-Content $bashrcPath -Raw
     if ($content -match "# Cygwin aliases") {
-        $newContent = $content -replace '(?s)\r?\n# Cygwin aliases.*', ''
+        # Remove the entire Cygwin aliases block (7 lines)
+        $newContent = $content -replace '(?s)\r?\n# Cygwin aliases\r?\nalias cygctl=.*\r?\nalias apt-cyg=.*\r?\nalias sudo=.*\r?\nalias su=.*\r?\nalias cyg=.*\r?\nalias apt=.*', ''
         Set-Content -Path $bashrcPath -Value $newContent -NoNewline
         Write-Host "  OK Removed aliases" -ForegroundColor Green
     } else {
@@ -101,7 +102,8 @@ $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
 if (Test-Path $cygwinBashrc) {
     $content = Get-Content $cygwinBashrc -Raw
     if ($content -match "# Cygwin aliases") {
-        $newContent = $content -replace '(?s)\r?\n# Cygwin aliases.*', ''
+        # Remove the entire Cygwin aliases block (7 lines)
+        $newContent = $content -replace '(?s)\r?\n# Cygwin aliases\r?\nalias cygctl=.*\r?\nalias apt-cyg=.*\r?\nalias sudo=.*\r?\nalias su=.*\r?\nalias cyg=.*\r?\nalias apt=.*', ''
         Set-Content -Path $cygwinBashrc -Value $newContent -NoNewline
         Write-Host "  OK Removed aliases" -ForegroundColor Green
     } else {
