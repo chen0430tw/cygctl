@@ -9,30 +9,17 @@
 > 它是一个控制工具，用于在**已安装的 Cygwin 环境**中执行命令，提供类似 WSL 的接口。
 > 如需安装 Cygwin，请访问 [cygwin.com](https://www.cygwin.com)。如需安装 WSL，请参阅 [Microsoft 文档](https://learn.microsoft.com/windows/wsl/install)。
 
-一个面向 AI Agent 和开发者的 Cygwin WSL 风格命令行工具。
-
-**cygctl 不是 shell alias，也不是 shim 垫片。** 简单的 `alias cyg='bash.exe'` 在涉及管道、退出码检测或用户切换时就会失效。cygctl 是一个专门构建的二进制工具，负责处理以下这些事：
+**cygctl 不是 shell alias，也不是 shim 垫片。** 简单的 `alias cyg='bash.exe'` 在涉及管道、退出码或用户切换时就会失效。cygctl 是一个专门构建的二进制工具，负责处理：
 
 - **正确的 stdio 连接** — stdin/stdout/stderr 被正确绑定，管道和重定向按预期工作
-- **退出码传递** — 子进程的退出码会原样返回给调用方，保障脚本和 CI 环境的可靠性
-- **进程生命周期管理** — 通过 Windows Job Object 和进程 API 枚举、查看并终止 Cygwin 进程
-- **UAC 提权** — `sudo` 启动一个提权子进程并将其 I/O 桥接回来，这是任何 alias 都无法实现的
+- **退出码传递** — 子进程的退出码原样返回给调用方，保障脚本和 CI 环境的可靠性
+- **进程生命周期管理** — 通过 Windows Job Object 枚举、查看并终止 Cygwin 进程
+- **UAC 提权** — `sudo` 启动提权子进程并桥接 I/O，这是任何 alias 都无法实现的
 - **用户切换** — `su` 调用 `CreateProcessWithLogonW`，以另一个 Windows 账户身份启动进程
 - **WSL 互操作** — 在 Cygwin 与 WSL 之间进行路径格式转换和跨环境命令调度
 - **包管理** — 以 Go 重写的 `apt-cyg`，具备完整的依赖解析能力
 
-WSL 风格的接口只是 UX 层，真正的价值在于它背后所做的一切。
-
-## 功能特性
-
-- **单一可执行文件** - 无依赖，直接放入 PATH 即可使用
-- **WSL 风格接口** - WSL 用户熟悉的语法
-- **AI Agent 友好** - 简单、可预期的命令结构
-- **完整的标准输入/输出支持** - 正确的管道处理
-- **退出码传递** - 脚本使用时返回正确退出码
-- **包管理** - 以 Go 重写的 apt-cyg
-- **UAC 提权** - sudo 用于 Windows 管理员任务
-- **用户切换** - su 用于切换 Windows 用户账户
+cygctl 是单一可执行文件，无依赖，直接放入 PATH 即可使用，专为 AI Agent、开发者脚本和 CI/CD 流水线设计。
 
 ## 快速安装
 
@@ -101,38 +88,20 @@ cyg ls -la /tmp
 ### 包管理（apt-cyg）
 
 ```bash
-# 更新包列表
-apt update
-
-# 搜索包
-apt search python
-
-# 安装包
-apt install vim git
-
-# 列出已安装的包
-apt list --installed
-
-# 显示包信息
-apt show bash
-
-# 显示依赖关系
-apt depends vim
-
-# 升级包
-apt upgrade
-
-# 移除包
-apt remove vim
+apt update               # 更新包列表
+apt search python        # 搜索包
+apt install vim git      # 安装包
+apt list --installed     # 列出已安装的包
+apt show bash            # 显示包信息
+apt depends vim          # 显示依赖关系
+apt upgrade              # 升级包
+apt remove vim           # 移除包
 ```
 
 ### Sudo（UAC 提权）
 
 ```bash
-# 以管理员权限执行命令
 sudo netstat -an
-
-# 编辑受保护的文件
 sudo notepad C:\Windows\System32\drivers\etc\hosts
 ```
 
@@ -140,14 +109,12 @@ sudo notepad C:\Windows\System32\drivers\etc\hosts
 
 ```bash
 # 以其他 Windows 用户身份打开交互式登录 Shell
-cyg --user alice
 su alice
 
 # 以其他用户身份执行单个命令
-cyg --user alice --exec "whoami"
 su alice whoami
 
-# 切换目录后以其他用户身份打开 Shell
+# 通过 cyg 指定用户
 cyg --user alice --cd "D:\Projects"
 ```
 
@@ -166,8 +133,6 @@ cyg wsl --list
 
 # 转换路径格式（Windows / Cygwin / WSL）
 cyg wsl --path "C:\Users\alice"
-cyg wsl --path /cygdrive/c/Users/alice
-cyg wsl --path /mnt/c/Users/alice
 # 输出：windows=C:\Users\alice
 #       cygwin=/cygdrive/c/Users/alice
 #       wsl=/mnt/c/Users/alice
@@ -232,23 +197,10 @@ cyg --help      # 显示帮助
 需要 Go 1.21 及以上版本
 
 ```bash
-# 构建全部
-make all
-
-# 安装至 Cygwin bin
-make install
-
-# 清理
-make clean
+make all      # 构建全部
+make install  # 安装至 Cygwin bin
+make clean    # 清理
 ```
-
-## 为什么需要 cygctl？
-
-现有的 Cygwin 包装工具（如 mintty）是终端模拟器，而非命令行工具。cygctl 填补了这个空缺，为 Cygwin 提供类似 `wsl` 的接口，让以下使用场景更加便利：
-
-- AI Agent 执行 Cygwin 命令
-- 开发者编写 Cygwin 操作脚本
-- CI/CD 流水线与 Cygwin 交互
 
 ## 许可证
 
