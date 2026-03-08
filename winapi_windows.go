@@ -43,8 +43,11 @@ func findCygwinRoot() string {
 				if err != nil || val == "" {
 					continue
 				}
-				// Strip NT long path prefix if present
+				// Strip NT/Win32 long path prefixes if present:
+				// \\?\ = Win32 extended path prefix
+				// \??\ = NT namespace prefix (written by some Cygwin versions)
 				val = strings.TrimPrefix(val, `\\?\`)
+				val = strings.TrimPrefix(val, `\??\`)
 				return val
 			}
 			k.Close()
@@ -88,9 +91,10 @@ func getCygwinProcesses() []ProcessInfo {
 	}
 
 	rootLower := strings.ToLower(CygwinRoot)
+	driveMap := buildDriveMap()
 	var result []ProcessInfo
 	for {
-		if fullPath, err := queryProcessImagePath(pe.ProcessID); err == nil {
+		if fullPath, err := queryProcessImagePath(pe.ProcessID, driveMap); err == nil {
 			if strings.HasPrefix(strings.ToLower(fullPath), rootLower+`\`) ||
 				strings.EqualFold(fullPath, CygwinRoot) {
 				name := windows.UTF16ToString(pe.ExeFile[:])
@@ -113,10 +117,30 @@ var (
 	procGetProcessImageFileName = modPsapi.NewProc("GetProcessImageFileNameW")
 )
 
+// buildDriveMap builds a map from NT device path prefix to Win32 drive letter
+// (e.g. `\Device\HarddiskVolume1` → `C:`).  Call once per enumeration pass.
+func buildDriveMap() map[string]string {
+	m := make(map[string]string, 26)
+	for c := 'A'; c <= 'Z'; c++ {
+		drive := string(c) + ":"
+		drivePtr, err := windows.UTF16PtrFromString(drive)
+		if err != nil {
+			continue
+		}
+		var devBuf [windows.MAX_PATH]uint16
+		n, err := windows.QueryDosDevice(drivePtr, &devBuf[0], uint32(len(devBuf)))
+		if err != nil || n == 0 {
+			continue
+		}
+		m[windows.UTF16ToString(devBuf[:n])] = drive
+	}
+	return m
+}
+
 // queryProcessImagePath returns the full executable path of a process.
 // Uses GetProcessImageFileName (XP+) instead of QueryFullProcessImageName
 // (Vista+) for broader compatibility.
-func queryProcessImagePath(pid uint32) (string, error) {
+func queryProcessImagePath(pid uint32, driveMap map[string]string) (string, error) {
 	h, err := windows.OpenProcess(windows.PROCESS_QUERY_INFORMATION, false, pid)
 	if err != nil {
 		return "", err
@@ -133,24 +157,13 @@ func queryProcessImagePath(pid uint32) (string, error) {
 		return "", err
 	}
 	ntPath := windows.UTF16ToString(buf[:r])
-	return devicePathToWin32(ntPath), nil
+	return devicePathToWin32(ntPath, driveMap), nil
 }
 
 // devicePathToWin32 converts an NT device path (e.g. \Device\HarddiskVolume1\foo.exe)
-// to a Win32 drive-letter path (e.g. C:\foo.exe) using QueryDosDevice.
-func devicePathToWin32(ntPath string) string {
-	for c := 'A'; c <= 'Z'; c++ {
-		drive := string(c) + ":"
-		drivePtr, err := windows.UTF16PtrFromString(drive)
-		if err != nil {
-			continue
-		}
-		var devBuf [windows.MAX_PATH]uint16
-		n, err := windows.QueryDosDevice(drivePtr, &devBuf[0], uint32(len(devBuf)))
-		if err != nil || n == 0 {
-			continue
-		}
-		devPath := windows.UTF16ToString(devBuf[:n])
+// to a Win32 drive-letter path (e.g. C:\foo.exe) using a pre-built drive map.
+func devicePathToWin32(ntPath string, driveMap map[string]string) string {
+	for devPath, drive := range driveMap {
 		if strings.HasPrefix(ntPath, devPath+`\`) {
 			return drive + ntPath[len(devPath):]
 		}

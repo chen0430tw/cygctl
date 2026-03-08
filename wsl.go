@@ -232,12 +232,11 @@ func winToWsl(p string) string {
 	return p
 }
 
-// cygwinToWin converts /cygdrive/c/foo/bar → C:\foo\bar
-func cygwinToWin(p string) string {
-	// strip /cygdrive/
-	rest := p[len("/cygdrive/"):]
+// mountSuffixToWin converts the suffix after a Unix mount prefix
+// (e.g. "c/foo/bar") to a Win32 path ("C:\foo\bar").
+func mountSuffixToWin(rest, original string) string {
 	if len(rest) == 0 {
-		return p
+		return original
 	}
 	drive := strings.ToUpper(string(rest[0]))
 	tail := ""
@@ -247,18 +246,14 @@ func cygwinToWin(p string) string {
 	return drive + ":" + tail
 }
 
+// cygwinToWin converts /cygdrive/c/foo/bar → C:\foo\bar
+func cygwinToWin(p string) string {
+	return mountSuffixToWin(p[len("/cygdrive/"):], p)
+}
+
 // wslToWin converts /mnt/c/foo/bar → C:\foo\bar
 func wslToWin(p string) string {
-	rest := p[len("/mnt/"):] // e.g. "c/foo/bar"
-	if len(rest) == 0 {
-		return p
-	}
-	drive := strings.ToUpper(string(rest[0]))
-	tail := ""
-	if len(rest) > 1 {
-		tail = strings.ReplaceAll(rest[1:], "/", `\`)
-	}
-	return drive + ":" + tail
+	return mountSuffixToWin(p[len("/mnt/"):], p)
 }
 
 // wslExec runs a command inside a WSL distro.
