@@ -2,12 +2,26 @@
 
 # cygctl
 
+**cygctl** 是一个 Windows 命令行工具，让你在 PowerShell、CMD 或 Git Bash 中以与 `wsl` 相同的方式调用 Cygwin 命令，无需打开 Cygwin 自带的终端模拟器。
+
 > [!IMPORTANT]
 > **cygctl 不会安装、下载或配置 Cygwin 或 WSL。**
 > 它是一个控制工具，用于在**已安装的 Cygwin 环境**中执行命令，提供类似 WSL 的接口。
 > 如需安装 Cygwin，请访问 [cygwin.com](https://www.cygwin.com)。如需安装 WSL，请参阅 [Microsoft 文档](https://learn.microsoft.com/windows/wsl/install)。
 
 一个面向 AI Agent 和开发者的 Cygwin WSL 风格命令行工具。
+
+**cygctl 不是 shell alias，也不是 shim 垫片。** 简单的 `alias cyg='bash.exe'` 在涉及管道、退出码检测或用户切换时就会失效。cygctl 是一个专门构建的二进制工具，负责处理以下这些事：
+
+- **正确的 stdio 连接** — stdin/stdout/stderr 被正确绑定，管道和重定向按预期工作
+- **退出码传递** — 子进程的退出码会原样返回给调用方，保障脚本和 CI 环境的可靠性
+- **进程生命周期管理** — 通过 Windows Job Object 和进程 API 枚举、查看并终止 Cygwin 进程
+- **UAC 提权** — `sudo` 启动一个提权子进程并将其 I/O 桥接回来，这是任何 alias 都无法实现的
+- **用户切换** — `su` 调用 `CreateProcessWithLogonW`，以另一个 Windows 账户身份启动进程
+- **WSL 互操作** — 在 Cygwin 与 WSL 之间进行路径格式转换和跨环境命令调度
+- **包管理** — 以 Go 重写的 `apt-cyg`，具备完整的依赖解析能力
+
+WSL 风格的接口只是 UX 层，真正的价值在于它背后所做的一切。
 
 ## 功能特性
 

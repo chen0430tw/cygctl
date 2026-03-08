@@ -2,12 +2,26 @@ English | [简体中文](./README.zh-CN.md)
 
 # cygctl
 
+**cygctl** is a Windows command-line tool that lets you run Cygwin commands from any shell — PowerShell, CMD, or Git Bash — with the same interface as `wsl`, without touching Cygwin's own terminal emulator.
+
 > [!IMPORTANT]
 > **cygctl does NOT install, download, or set up Cygwin or WSL.**
 > It is a control tool for running commands inside an **already-installed Cygwin environment**, with a WSL-like interface.
 > To install Cygwin, visit [cygwin.com](https://www.cygwin.com). To install WSL, see the [Microsoft documentation](https://learn.microsoft.com/windows/wsl/install).
 
 A WSL-like command-line tool for Cygwin, designed for AI Agents and developers.
+
+**cygctl is not a shell alias or a shim.** A naive `alias cyg='bash.exe'` breaks the moment you pipe data, check exit codes, or need to switch users. cygctl is a purpose-built binary that handles:
+
+- **Correct stdio wiring** — stdin/stdout/stderr are connected properly so pipes and redirections work as expected
+- **Exit code propagation** — the child process exit code is returned to the caller, enabling reliable scripting and CI use
+- **Process lifecycle management** — enumerate, inspect, and shut down Cygwin processes via the Windows job object and process APIs
+- **UAC elevation** — `sudo` launches an elevated child process and bridges its I/O back, which no alias can do
+- **User switching** — `su` calls `CreateProcessWithLogonW` to start a process under a different Windows account
+- **WSL interop** — path format conversion and cross-environment command dispatch between Cygwin and WSL
+- **Package management** — `apt-cyg` rewritten in Go with proper dependency resolution
+
+The WSL-like interface is just the UX layer. The substance is everything underneath it.
 
 ## Features
 
