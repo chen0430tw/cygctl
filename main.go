@@ -29,6 +29,7 @@ var (
 	BashExe    string
 	AptCyg     string
 	SudoCmd    string
+	SuCmd      string
 )
 
 func init() {
@@ -37,6 +38,7 @@ func init() {
 	BashExe = CygwinBin + `\bash.exe`
 	AptCyg = CygwinBin + `\apt.exe`
 	SudoCmd = CygwinBin + `\sudo.exe`
+	SuCmd = CygwinBin + `\su.exe`
 }
 
 func main() {
@@ -149,8 +151,14 @@ func isAptCygCommand(arg string) bool {
 func runInteractive(user string) {
 	var cmd *exec.Cmd
 	if user != "" {
-		// Launch a login shell as the specified user via su.
-		cmd = exec.Command(BashExe, "--login", "-c", fmt.Sprintf("su -l %s", user))
+		// Delegate to su.exe which uses CreateProcessWithLogonW (Windows-native
+		// user switching) instead of the unreliable Cygwin su package.
+		if _, err := os.Stat(SuCmd); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error: su not found at", SuCmd)
+			fmt.Fprintln(os.Stderr, "Please build and install su.exe first (make su).")
+			os.Exit(2)
+		}
+		cmd = exec.Command(SuCmd, user)
 	} else {
 		cmd = exec.Command(BashExe, "-i")
 	}
@@ -168,33 +176,37 @@ func runInteractive(user string) {
 func execCommand(command string, workingDir string, user string) {
 	var cmd *exec.Cmd
 
-	// Build the inner shell script, optionally wrapped in su.
-	buildScript := func(script string) string {
-		if user != "" {
-			// Single-quote the inner command to pass it safely to su -c.
-			inner := strings.ReplaceAll(script, `'`, `'\''`)
-			return fmt.Sprintf("su -l %s -c '%s'", user, inner)
+	if user != "" {
+		// Delegate to su.exe (Windows-native user switching via CreateProcessWithLogonW).
+		if _, err := os.Stat(SuCmd); os.IsNotExist(err) {
+			fmt.Fprintln(os.Stderr, "Error: su not found at", SuCmd)
+			fmt.Fprintln(os.Stderr, "Please build and install su.exe first (make su).")
+			os.Exit(2)
 		}
-		return script
-	}
-
-	if workingDir != "" {
-		cygPath := toCygwinPath(workingDir)
-		if command != "" {
-			script := buildScript(fmt.Sprintf("cd '%s' && %s", cygPath, command))
-			cmd = exec.Command(BashExe, "--login", "-c", script)
-		} else {
-			// Only --cd, launch interactive shell in that directory.
-			if user != "" {
-				script := buildScript(fmt.Sprintf("cd '%s' && exec bash -i", cygPath))
-				cmd = exec.Command(BashExe, "--login", "-c", script)
+		if workingDir != "" {
+			cygPath := toCygwinPath(workingDir)
+			if command != "" {
+				cmd = exec.Command(SuCmd, user, fmt.Sprintf("cd '%s' && %s", cygPath, command))
 			} else {
-				cmd = exec.Command(BashExe, "-i")
-				cmd.Dir = workingDir
+				cmd = exec.Command(SuCmd, user, fmt.Sprintf("cd '%s' && exec bash -i", cygPath))
+			}
+		} else {
+			if command != "" {
+				cmd = exec.Command(SuCmd, user, command)
+			} else {
+				cmd = exec.Command(SuCmd, user)
 			}
 		}
+	} else if workingDir != "" {
+		cygPath := toCygwinPath(workingDir)
+		if command != "" {
+			cmd = exec.Command(BashExe, "--login", "-c", fmt.Sprintf("cd '%s' && %s", cygPath, command))
+		} else {
+			cmd = exec.Command(BashExe, "-i")
+			cmd.Dir = workingDir
+		}
 	} else {
-		cmd = exec.Command(BashExe, "--login", "-c", buildScript(command))
+		cmd = exec.Command(BashExe, "--login", "-c", command)
 	}
 
 	cmd.Stdin = os.Stdin
@@ -272,7 +284,7 @@ Options:
     --exec <command>         Execute the specified command
     -e <command>             Alias for --exec
     --cd <path>              Change to specified directory before executing
-    --user <name>            Run command (or shell) as the specified Cygwin user
+    --user <name>            Run command (or shell) as the specified Windows user
     -u <name>                Alias for --user
     --status                 Show Cygwin status information
     --shutdown               Terminate all Cygwin processes
