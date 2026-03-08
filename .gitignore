@@ -6,7 +6,7 @@
 *.dylib
 
 # Build
-cygctl
+/cygctl
 go.work.sum
 
 # IDE

@@ -12,7 +12,7 @@ CYGWIN_BIN = C:/cygwin64/bin
 all: cygctl apt-cyg sudo su
 
 cygctl:
-	$(GO) build $(GOFLAGS) -o cygctl.exe .
+	cd cmd/cygctl && $(GO) build $(GOFLAGS) -o ../../cygctl.exe .
 
 apt-cyg:
 	cd cmd/apt-cyg && $(GO) build $(GOFLAGS) -o apt-cyg.exe .

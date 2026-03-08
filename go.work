@@ -1,7 +1,7 @@
 go 1.26.1
 
 use (
-	.
+	./cmd/cygctl
 	./cmd/apt-cyg
 	./cmd/su
 	./cmd/sudo
