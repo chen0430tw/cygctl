@@ -97,6 +97,9 @@ func main() {
 				os.Exit(1)
 			}
 			i++
+		case arg == "wsl":
+			runWslCommand(args[i+1:])
+			return
 		case isAptCygCommand(arg):
 			runAptCyg(args[i:])
 			return
@@ -276,13 +279,23 @@ Apt Commands (package management):
 Sudo Command:
     sudo <command>           Run command with elevated privileges (UAC)
 
+WSL Commands:
+    wsl                      Launch default WSL distro interactively
+    wsl --list               List WSL distributions with state and version
+    wsl --path <path>        Convert path between Windows / Cygwin / WSL formats
+    wsl --exec [<distro>] -- <cmd...>  Run command in WSL distro
+    wsl --shutdown           Shut down all WSL2 VMs
+
 Examples:
     ` + exampleName + `                              Launch interactive Cygwin shell
     ` + exampleName + ` --exec "ls -la /cygdrive/c"  List C: drive contents
     ` + exampleName + ` --cd "D:\Projects" --exec "pwd"  Change dir and print working directory
-    ` + exampleName + ` --status                     Show Cygwin status
+    ` + exampleName + ` --status                     Show Cygwin + WSL status
     ` + exampleName + ` install vim                  Install vim package
     ` + exampleName + ` sudo nano /etc/hosts         Edit hosts file with admin rights
+    ` + exampleName + ` wsl --list                   List WSL distros
+    ` + exampleName + ` wsl --path "C:\Users\foo"    Show path in all three formats
+    ` + exampleName + ` wsl --exec Ubuntu -- uname -a  Run uname in Ubuntu distro
 `
 	fmt.Print(help)
 }
@@ -344,6 +357,17 @@ func showStatus() {
 		fmt.Println("  sudo: Not installed")
 	} else {
 		fmt.Println("  sudo: Installed")
+	}
+
+	// WSL status
+	fmt.Println()
+	fmt.Println("=== WSL Status ===")
+	fmt.Println()
+	distros, err := wslListDistros()
+	if err != nil {
+		fmt.Println("  WSL not available:", err)
+	} else {
+		printWslDistros(distros)
 	}
 }
 
