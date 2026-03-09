@@ -120,8 +120,8 @@ func main() {
 	// Read configuration from setup.rc (mirror, cache)
 	readSetupRC()
 
-	// Ensure cache directory exists
-	os.MkdirAll(CacheDir, 0755)
+	// Ensure cache directory exists (CurrentCache may differ from CacheDir after readSetupRC)
+	os.MkdirAll(CurrentCache, 0755)
 	os.MkdirAll(InstalledDir, 0755)
 
 	command := cleanArgs[0]
@@ -799,7 +799,7 @@ func cmdDownload(names []string) {
 			continue
 		}
 
-		cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
+		cacheFile := filepath.Join(CurrentCache, filepath.Base(pkg.Install))
 
 		if _, err := os.Stat(cacheFile); err == nil {
 			fmt.Printf("%s already downloaded: %s\n", name, cacheFile)
@@ -847,7 +847,7 @@ func cmdCheck(names []string) {
 
 		// Check 1: cached archive size and hash
 		if hasEntry {
-			archivePath := filepath.Join(CacheDir, entry.Archive)
+			archivePath := filepath.Join(CurrentCache, entry.Archive)
 			if _, err := os.Stat(archivePath); err == nil {
 				if err := checkHollow(name, archivePath); err != nil {
 					fmt.Fprintf(os.Stderr, "  archive: %v\n", err)
@@ -1049,7 +1049,7 @@ func cmdReinstall(names []string) {
 			continue
 		}
 		// Force redownload by removing cached archive
-		cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
+		cacheFile := filepath.Join(CurrentCache, filepath.Base(pkg.Install))
 		os.Remove(cacheFile)
 		installPackage(name, pkg, 1, true)
 	}
@@ -1062,11 +1062,12 @@ func cmdReinstall(names []string) {
 // resolveInstallList returns the ordered list of packages to install,
 // excluding already-installed ones.
 func resolveInstallList(names []string, packages map[string]Package) []string {
-	visiting := make(map[string]bool)
+	visiting := make(map[string]bool) // current DFS path — cycle guard
+	done := make(map[string]bool)     // fully resolved — skip re-processing
 	var ordered []string
 
 	for _, name := range names {
-		deps := resolveDependencies(name, packages, visiting)
+		deps := resolveDependencies(name, packages, visiting, done)
 		ordered = append(ordered, deps...)
 	}
 
@@ -1082,14 +1083,17 @@ func resolveInstallList(names []string, packages map[string]Package) []string {
 	return unique
 }
 
-func resolveDependencies(name string, packages map[string]Package, visiting map[string]bool) []string {
+func resolveDependencies(name string, packages map[string]Package, visiting, done map[string]bool) []string {
 	// Resolve virtual package names (provides:)
-	resolved := resolveProvides(name, packages)
-	name = resolved
+	name = resolveProvides(name, packages)
 
-	// Circular dependency guard
+	// Already fully resolved in a previous branch — return without re-processing.
+	if done[name] {
+		return []string{name}
+	}
+
+	// Cycle guard: package is already on the current DFS stack — skip silently.
 	if visiting[name] {
-		fmt.Printf("  (skipping %s — already queued, circular dependency?)\n", name)
 		return nil
 	}
 
@@ -1100,7 +1104,10 @@ func resolveDependencies(name string, packages map[string]Package, visiting map[
 	}
 
 	visiting[name] = true
-	defer func() { delete(visiting, name) }()
+	defer func() {
+		delete(visiting, name)
+		done[name] = true
+	}()
 
 	result := []string{name}
 
@@ -1114,7 +1121,7 @@ func resolveDependencies(name string, packages map[string]Package, visiting map[
 			if depName == "" {
 				continue
 			}
-			subDeps := resolveDependencies(depName, packages, visiting)
+			subDeps := resolveDependencies(depName, packages, visiting, done)
 			result = append(result, subDeps...)
 		}
 	}
@@ -1154,7 +1161,7 @@ func installPackage(name string, pkg Package, explicit int, force bool) {
 
 	fmt.Printf("\nInstalling %s (%s)...\n", name, pkg.Version)
 
-	cacheFile := filepath.Join(CacheDir, filepath.Base(pkg.Install))
+	cacheFile := filepath.Join(CurrentCache, filepath.Base(pkg.Install))
 
 	// Download if not cached or if force-reinstall
 	needDownload := force
@@ -1384,7 +1391,7 @@ func cmdAutoremove() {
 func cmdClean() {
 	fmt.Println("Cleaning package cache...")
 
-	files, err := os.ReadDir(CacheDir)
+	files, err := os.ReadDir(CurrentCache)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
@@ -1406,7 +1413,7 @@ func cmdClean() {
 			continue
 		}
 		totalSize += info.Size()
-		if err := os.Remove(filepath.Join(CacheDir, f.Name())); err != nil {
+		if err := os.Remove(filepath.Join(CurrentCache, f.Name())); err != nil {
 			fmt.Fprintf(os.Stderr, "Warning: Failed to remove %s: %v\n", f.Name(), err)
 		} else {
 			removed++
