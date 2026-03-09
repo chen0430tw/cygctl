@@ -1956,18 +1956,12 @@ func humanSize(n int64) string {
 }
 
 func toCygwinPath(winPath string) string {
-	// Paths inside CygwinRoot map to / in the Cygwin namespace.
-	// e.g. C:\cygwin64\var\cache\... → /var/cache/...
-	if strings.HasPrefix(strings.ToLower(winPath), strings.ToLower(CygwinRoot)) {
-		rel := winPath[len(CygwinRoot):]
-		return strings.ReplaceAll(rel, `\`, "/")
-	}
-	// General Windows drive path → /cygdrive/X/...
-	cygPath := strings.ReplaceAll(winPath, `\`, "/")
-	if len(cygPath) >= 2 && cygPath[1] == ':' {
-		cygPath = "/cygdrive/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
-	}
-	return cygPath
+	// Use mixed-style paths (C:/path/...) rather than Cygwin virtual paths
+	// (/var/...) or /cygdrive/c/... notation. When bash.exe is spawned from
+	// a native Windows process, Cygwin virtual mounts are not reliably
+	// accessible, but Windows drive paths with forward slashes are always
+	// understood by bash and Cygwin tools.
+	return strings.ReplaceAll(winPath, `\`, "/")
 }
 
 func toWindowsPath(cygPath string) (string, error) {
