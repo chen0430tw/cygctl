@@ -430,21 +430,15 @@ func tryDownloadSetup(filename string) bool {
 	ext := filepath.Ext(filename)
 	switch ext {
 	case ".xz":
-		// Invoke xz.exe directly (PE binary) with the Windows path.
-		// Cygwin initialises when xz.exe starts and can open Windows paths.
-		xzExe := filepath.Join(CygwinRoot, "bin", "xz.exe")
-		dest, err := os.Create(SetupIni)
-		if err != nil {
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cygTmp := toCygwinPath(tmpPath)
+		cygDest := toCygwinPath(SetupIni)
+		decompressed := strings.TrimSuffix(tmpPath, ".xz")
+		cmd := exec.Command(bashExe, "--login", "-c",
+			fmt.Sprintf("xz -d '%s' && mv '%s' '%s'",
+				cygTmp, toCygwinPath(decompressed), cygDest))
+		if err := cmd.Run(); err != nil {
 			os.Remove(tmpPath)
-			return false
-		}
-		cmd := exec.Command(xzExe, "--decompress", "--stdout", tmpPath)
-		cmd.Stdout = dest
-		runErr := cmd.Run()
-		dest.Close()
-		os.Remove(tmpPath)
-		if runErr != nil {
-			os.Remove(SetupIni)
 			return false
 		}
 
@@ -1227,7 +1221,7 @@ func installPackage(name string, pkg Package, explicit int, force bool) {
 
 	// Save file listing and extract
 	fmt.Println("Unpacking...")
-	if err := extractPackage(cacheFile, CygwinRoot, name); err != nil {
+	if err := extractPackage(cacheFile, "/", name); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to extract %s: %v\n", name, err)
 		rollbackInstall(name)
 		os.Exit(1)
@@ -1248,34 +1242,18 @@ func installPackage(name string, pkg Package, explicit int, force bool) {
 	fmt.Printf("%s installed.\n", name)
 }
 
-// systemTarExe returns the path to the Windows built-in tar.exe
-// (available since Windows 10 1803 / Server 2019).
-// It accepts native Windows paths, so no Cygwin path conversion is needed.
-func systemTarExe() string {
-	sysRoot := os.Getenv("SystemRoot")
-	if sysRoot == "" {
-		sysRoot = `C:\Windows`
-	}
-	return filepath.Join(sysRoot, "System32", "tar.exe")
-}
-
 func extractPackage(archivePath, dst, pkgName string) error {
-	tarExe := systemTarExe()
+	bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+	cygSrc := toCygwinPath(archivePath)
 
-	// Save file manifest: tar -tf <archive> | gzip → InstalledDir\pkg.lst.gz
-	lstFile := filepath.Join(InstalledDir, pkgName+".lst.gz")
-	if out, err := exec.Command(tarExe, "-tf", archivePath).Output(); err == nil {
-		if lf, err := os.Create(lstFile); err == nil {
-			gw := gzip.NewWriter(lf)
-			gw.Write(out)
-			gw.Close()
-			lf.Close()
-		}
-	}
+	// Save file manifest: tar tf $archive | gzip > /etc/setup/$pkg.lst.gz
+	lstFile := toCygwinPath(filepath.Join(InstalledDir, pkgName+".lst.gz"))
+	listCmd := fmt.Sprintf("tar -tf '%s' | gzip > '%s'", cygSrc, lstFile)
+	exec.Command(bashExe, "--login", "-c", listCmd).Run() // best-effort
 
-	// Extract using Windows system tar (understands Windows paths natively,
-	// auto-detects xz/bz2/gz compression via libarchive).
-	cmd := exec.Command(tarExe, "-xf", archivePath, "-C", dst)
+	// Extract; dst is a Cygwin path (e.g. "/") so tar places files correctly.
+	extractCmd := fmt.Sprintf("tar -xf '%s' -C '%s'", cygSrc, dst)
+	cmd := exec.Command(bashExe, "--login", "-c", extractCmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -1606,7 +1584,7 @@ func runAllPostinstall() {
 			dashExe := filepath.Join(CygwinRoot, "bin", "dash.exe")
 			cmd = exec.Command(dashExe, cygScript)
 		} else {
-			cmd = exec.Command(bashExe, cygScript)
+			cmd = exec.Command(bashExe, "--login", cygScript)
 		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -1620,7 +1598,7 @@ func runPreremove(name string) {
 	if _, err := os.Stat(script); err == nil {
 		fmt.Printf("Running pre-remove script for %s...\n", name)
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cmd := exec.Command(bashExe, toCygwinPath(script))
+		cmd := exec.Command(bashExe, "--login", toCygwinPath(script))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Run()
@@ -1642,14 +1620,12 @@ func checkHollow(pkg, archivePath string) error {
 	if size < hollowMinBytes {
 		// Peek inside: if it's a valid tar with no .dll/.exe entries it may be
 		// a meta-package (safe). Only flag archives that are tiny AND binary-named.
-		out, _ := exec.Command(systemTarExe(), "-tf", archivePath).Output()
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cygSrc := toCygwinPath(archivePath)
+		out, _ := exec.Command(bashExe, "--login", "-c",
+			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -ciE '\\.(dll|exe)$' || echo 0", cygSrc)).Output()
 		binCount := 0
-		for _, line := range strings.Split(string(out), "\n") {
-			l := strings.ToLower(strings.TrimSpace(line))
-			if strings.HasSuffix(l, ".dll") || strings.HasSuffix(l, ".exe") {
-				binCount++
-			}
-		}
+		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &binCount)
 
 		if binCount == 0 {
 			// Valid meta-package with no binaries
@@ -1677,14 +1653,12 @@ func checkHollow(pkg, archivePath string) error {
 			pkg, humanSize(size))
 
 		// Count non-directory entries
-		out, _ := exec.Command(systemTarExe(), "-tf", archivePath).Output()
+		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
+		cygSrc := toCygwinPath(archivePath)
+		out, _ := exec.Command(bashExe, "--login", "-c",
+			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -vc '/$' || echo 0", cygSrc)).Output()
 		realFiles := 0
-		for _, line := range strings.Split(string(out), "\n") {
-			l := strings.TrimSpace(line)
-			if l != "" && !strings.HasSuffix(l, "/") {
-				realFiles++
-			}
-		}
+		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &realFiles)
 
 		if realFiles == 0 {
 			msg := fmt.Sprintf("*** HOLLOW PACKAGE: %s — archive contains only directories ***", pkg)
@@ -1752,7 +1726,7 @@ func verifyHash(pkg, path, sha512hash, md5hash string) error {
 		// MD5 verification via bash md5sum
 		fmt.Printf("Verifying md5sum     %s ... ", filepath.Base(path))
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		out, err := exec.Command(bashExe, "-c",
+		out, err := exec.Command(bashExe, "--login", "-c",
 			fmt.Sprintf("md5sum '%s' | awk '{print $1}'", toCygwinPath(path))).Output()
 		if err != nil {
 			return fmt.Errorf("md5sum error: %v", err)
