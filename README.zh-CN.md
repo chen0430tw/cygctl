@@ -30,6 +30,29 @@ irm https://raw.githubusercontent.com/chen0430tw/cygctl/master/install.ps1 | iex
 
 安装完成后重启终端即可使用 `cyg` 和 `apt` 命令。
 
+> [!WARNING]
+> **PowerShell 执行策略报错（常见坑）**
+>
+> 如果出现以下错误，说明 PowerShell 默认禁止执行本地脚本：
+> ```
+> 因為這個系統上已停用指令碼執行，所以無法載入 ...Microsoft.PowerShell_profile.ps1
+> ```
+> 安装脚本会自动将当前用户的执行策略设置为 `RemoteSigned`（允许本地脚本，仍阻止未签名的网络下载脚本）。如果你是手动安装或遇到此错误，请在 PowerShell 中执行：
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+> ```
+> 然后重新打开终端即可。
+
+> [!NOTE]
+> **Cygwin 装在非 C 盘？** 安装脚本会自动从注册表（Cygwin setup 写入的路径）探测安装位置，无需手动指定。如果自动探测失败，也可以显式传入路径：
+> ```powershell
+> irm https://raw.githubusercontent.com/chen0430tw/cygctl/master/install.ps1 | iex; install.ps1 -CygwinRoot D:\cygwin64
+> ```
+> 或下载脚本后运行：
+> ```powershell
+> .\install.ps1 -CygwinRoot D:\MyCygwin
+> ```
+
 ## 手动安装
 
 ```powershell

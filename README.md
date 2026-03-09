@@ -30,6 +30,25 @@ irm https://raw.githubusercontent.com/chen0430tw/cygctl/master/install.ps1 | iex
 
 Restart your terminal after installation to use `cyg` and `apt` commands.
 
+> [!WARNING]
+> **PowerShell execution policy error (common gotcha)**
+>
+> If you see this error after installation:
+> ```
+> ...Microsoft.PowerShell_profile.ps1 cannot be loaded because running scripts is disabled on this system.
+> ```
+> Windows defaults to the `Restricted` execution policy, which blocks profile scripts from loading. The installer automatically sets your **current-user** policy to `RemoteSigned` (allows local scripts; still blocks unsigned scripts downloaded from the internet). If you installed manually or hit this error, run once in PowerShell:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+> ```
+> Then open a new terminal.
+
+> [!NOTE]
+> **Cygwin installed on a drive other than C:\?** The installer reads the installation path from the registry (written by Cygwin's setup.exe), so it finds the correct location automatically. If auto-detection fails, pass the path explicitly:
+> ```powershell
+> .\install.ps1 -CygwinRoot D:\cygwin64
+> ```
+
 ## Manual Install
 
 ```powershell

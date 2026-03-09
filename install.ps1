@@ -11,7 +11,7 @@
 #>
 
 param(
-    [string]$InstallDir = "C:\cygwin64\bin",
+    [string]$CygwinRoot = "",   # auto-detected from registry if omitted
     [string]$Version = "latest"
 )
 
@@ -20,12 +20,44 @@ $ErrorActionPreference = "Stop"
 Write-Host "=== Cygctl Installer ===" -ForegroundColor Cyan
 Write-Host ""
 
-# Check Cygwin exists
-if (-not (Test-Path "C:\cygwin64")) {
-    Write-Host "Error: Cygwin not found at C:\cygwin64" -ForegroundColor Red
-    Write-Host "Please install Cygwin first from https://cygwin.com" -ForegroundColor Yellow
+# Auto-detect Cygwin installation root
+# Cygwin's setup.exe writes the install path to the registry; try that first.
+if (-not $CygwinRoot) {
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Cygwin\setup",
+        "HKCU:\SOFTWARE\Cygwin\setup",
+        "HKLM:\SOFTWARE\WOW6432Node\Cygwin\setup"
+    )
+    foreach ($rp in $regPaths) {
+        $key = Get-ItemProperty $rp -ErrorAction SilentlyContinue
+        if ($key -and $key.rootdir -and (Test-Path $key.rootdir)) {
+            $CygwinRoot = $key.rootdir.TrimEnd('\')
+            Write-Host "  Detected Cygwin at $CygwinRoot (registry)" -ForegroundColor Gray
+            break
+        }
+    }
+}
+
+# Registry not found — fall back to common locations
+if (-not $CygwinRoot) {
+    $candidates = @("C:\cygwin64", "C:\cygwin", "D:\cygwin64", "D:\cygwin")
+    foreach ($c in $candidates) {
+        if (Test-Path $c) {
+            $CygwinRoot = $c
+            Write-Host "  Detected Cygwin at $CygwinRoot (filesystem scan)" -ForegroundColor Gray
+            break
+        }
+    }
+}
+
+if (-not $CygwinRoot) {
+    Write-Host "Error: Cygwin installation not found." -ForegroundColor Red
+    Write-Host "  Pass the path explicitly:  install.ps1 -CygwinRoot D:\MyCygwin" -ForegroundColor Yellow
+    Write-Host "  Or install Cygwin first from https://cygwin.com" -ForegroundColor Yellow
     exit 1
 }
+
+$InstallDir = Join-Path $CygwinRoot "bin"
 
 # GitHub release URL
 $BaseUrl = if ($Version -eq "latest") {
@@ -68,6 +100,18 @@ if ($userPath -like "*$InstallDir*") {
 
 # 3. PowerShell profile
 Write-Host "[3/6] Configuring PowerShell..." -ForegroundColor Green
+
+# Ensure scripts can run. Windows defaults to Restricted, which blocks profile loading.
+# RemoteSigned allows local scripts (including $PROFILE) while still blocking unsigned
+# scripts downloaded from the internet.
+$execPolicy = Get-ExecutionPolicy -Scope CurrentUser
+if ($execPolicy -eq "Restricted" -or $execPolicy -eq "Undefined") {
+    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+    Write-Host "  OK Set execution policy to RemoteSigned (was: $execPolicy)" -ForegroundColor Green
+} else {
+    Write-Host "  OK Execution policy: $execPolicy" -ForegroundColor Gray
+}
+
 $profilePath = $PROFILE
 $profileDir = Split-Path $profilePath -Parent
 
@@ -173,7 +217,7 @@ if (Test-Path $bashrcPath) {
 # We use cygpath to convert the Windows %USERPROFILE% path so the source line
 # resolves to the same ~/.bash_env that BASH_ENV points to.
 Write-Host "[6/6] Configuring Cygwin..." -ForegroundColor Green
-$cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
+$cygwinBashrc = "$CygwinRoot\home\$env:USERNAME\.bashrc"
 $cygwinSourceLine = @"
 
 # Load Cygwin aliases — use cygpath so this resolves even though
