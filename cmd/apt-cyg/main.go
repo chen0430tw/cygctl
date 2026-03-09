@@ -430,17 +430,21 @@ func tryDownloadSetup(filename string) bool {
 	ext := filepath.Ext(filename)
 	switch ext {
 	case ".xz":
-		// Use Cygwin bash+xz to decompress
-		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cygTmp := toCygwinPath(tmpPath)
-		cygDest := toCygwinPath(SetupIni)
-		// xz -d decompresses in place, removing the .xz file
-		decompressed := strings.TrimSuffix(tmpPath, ".xz")
-		cmd := exec.Command(bashExe, "-c",
-			fmt.Sprintf("xz -d '%s' && mv '%s' '%s'",
-				cygTmp, toCygwinPath(decompressed), cygDest))
-		if err := cmd.Run(); err != nil {
+		// Invoke xz.exe directly (PE binary) with the Windows path.
+		// Cygwin initialises when xz.exe starts and can open Windows paths.
+		xzExe := filepath.Join(CygwinRoot, "bin", "xz.exe")
+		dest, err := os.Create(SetupIni)
+		if err != nil {
 			os.Remove(tmpPath)
+			return false
+		}
+		cmd := exec.Command(xzExe, "--decompress", "--stdout", tmpPath)
+		cmd.Stdout = dest
+		runErr := cmd.Run()
+		dest.Close()
+		os.Remove(tmpPath)
+		if runErr != nil {
+			os.Remove(SetupIni)
 			return false
 		}
 
@@ -1244,19 +1248,34 @@ func installPackage(name string, pkg Package, explicit int, force bool) {
 	fmt.Printf("%s installed.\n", name)
 }
 
+// systemTarExe returns the path to the Windows built-in tar.exe
+// (available since Windows 10 1803 / Server 2019).
+// It accepts native Windows paths, so no Cygwin path conversion is needed.
+func systemTarExe() string {
+	sysRoot := os.Getenv("SystemRoot")
+	if sysRoot == "" {
+		sysRoot = `C:\Windows`
+	}
+	return filepath.Join(sysRoot, "System32", "tar.exe")
+}
+
 func extractPackage(archivePath, dst, pkgName string) error {
-	bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-	cygSrc := toCygwinPath(archivePath)
-	cygDst := toCygwinPath(dst)
+	tarExe := systemTarExe()
 
-	// Save file manifest: tar tf $archive | gzip > /etc/setup/$pkg.lst.gz
-	lstFile := toCygwinPath(filepath.Join(InstalledDir, pkgName+".lst.gz"))
-	listCmd := fmt.Sprintf("tar -tf '%s' | gzip > '%s'", cygSrc, lstFile)
-	exec.Command(bashExe, "-c", listCmd).Run() // best-effort
+	// Save file manifest: tar -tf <archive> | gzip → InstalledDir\pkg.lst.gz
+	lstFile := filepath.Join(InstalledDir, pkgName+".lst.gz")
+	if out, err := exec.Command(tarExe, "-tf", archivePath).Output(); err == nil {
+		if lf, err := os.Create(lstFile); err == nil {
+			gw := gzip.NewWriter(lf)
+			gw.Write(out)
+			gw.Close()
+			lf.Close()
+		}
+	}
 
-	// Extract (tar auto-detects xz/bz2/gz compression)
-	extractCmd := fmt.Sprintf("tar -xf '%s' -C '%s'", cygSrc, cygDst)
-	cmd := exec.Command(bashExe, "-c", extractCmd)
+	// Extract using Windows system tar (understands Windows paths natively,
+	// auto-detects xz/bz2/gz compression via libarchive).
+	cmd := exec.Command(tarExe, "-xf", archivePath, "-C", dst)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -1623,12 +1642,14 @@ func checkHollow(pkg, archivePath string) error {
 	if size < hollowMinBytes {
 		// Peek inside: if it's a valid tar with no .dll/.exe entries it may be
 		// a meta-package (safe). Only flag archives that are tiny AND binary-named.
-		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cygSrc := toCygwinPath(archivePath)
-		out, _ := exec.Command(bashExe, "-c",
-			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -ciE '\\.(dll|exe)$' || echo 0", cygSrc)).Output()
+		out, _ := exec.Command(systemTarExe(), "-tf", archivePath).Output()
 		binCount := 0
-		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &binCount)
+		for _, line := range strings.Split(string(out), "\n") {
+			l := strings.ToLower(strings.TrimSpace(line))
+			if strings.HasSuffix(l, ".dll") || strings.HasSuffix(l, ".exe") {
+				binCount++
+			}
+		}
 
 		if binCount == 0 {
 			// Valid meta-package with no binaries
@@ -1656,12 +1677,14 @@ func checkHollow(pkg, archivePath string) error {
 			pkg, humanSize(size))
 
 		// Count non-directory entries
-		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cygSrc := toCygwinPath(archivePath)
-		out, _ := exec.Command(bashExe, "-c",
-			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -vc '/$' || echo 0", cygSrc)).Output()
+		out, _ := exec.Command(systemTarExe(), "-tf", archivePath).Output()
 		realFiles := 0
-		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &realFiles)
+		for _, line := range strings.Split(string(out), "\n") {
+			l := strings.TrimSpace(line)
+			if l != "" && !strings.HasSuffix(l, "/") {
+				realFiles++
+			}
+		}
 
 		if realFiles == 0 {
 			msg := fmt.Sprintf("*** HOLLOW PACKAGE: %s — archive contains only directories ***", pkg)
