@@ -430,13 +430,11 @@ func tryDownloadSetup(filename string) bool {
 	ext := filepath.Ext(filename)
 	switch ext {
 	case ".xz":
-		// Use Cygwin bash+xz to decompress
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
 		cygTmp := toCygwinPath(tmpPath)
 		cygDest := toCygwinPath(SetupIni)
-		// xz -d decompresses in place, removing the .xz file
 		decompressed := strings.TrimSuffix(tmpPath, ".xz")
-		cmd := exec.Command(bashExe, "-c",
+		cmd := exec.Command(bashExe, "--login", "-c",
 			fmt.Sprintf("xz -d '%s' && mv '%s' '%s'",
 				cygTmp, toCygwinPath(decompressed), cygDest))
 		if err := cmd.Run(); err != nil {
@@ -1223,7 +1221,7 @@ func installPackage(name string, pkg Package, explicit int, force bool) {
 
 	// Save file listing and extract
 	fmt.Println("Unpacking...")
-	if err := extractPackage(cacheFile, CygwinRoot, name); err != nil {
+	if err := extractPackage(cacheFile, "/", name); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: Failed to extract %s: %v\n", name, err)
 		rollbackInstall(name)
 		os.Exit(1)
@@ -1247,16 +1245,15 @@ func installPackage(name string, pkg Package, explicit int, force bool) {
 func extractPackage(archivePath, dst, pkgName string) error {
 	bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
 	cygSrc := toCygwinPath(archivePath)
-	cygDst := toCygwinPath(dst)
 
 	// Save file manifest: tar tf $archive | gzip > /etc/setup/$pkg.lst.gz
 	lstFile := toCygwinPath(filepath.Join(InstalledDir, pkgName+".lst.gz"))
 	listCmd := fmt.Sprintf("tar -tf '%s' | gzip > '%s'", cygSrc, lstFile)
-	exec.Command(bashExe, "-c", listCmd).Run() // best-effort
+	exec.Command(bashExe, "--login", "-c", listCmd).Run() // best-effort
 
-	// Extract (tar auto-detects xz/bz2/gz compression)
-	extractCmd := fmt.Sprintf("tar -xf '%s' -C '%s'", cygSrc, cygDst)
-	cmd := exec.Command(bashExe, "-c", extractCmd)
+	// Extract; dst is a Cygwin path (e.g. "/") so tar places files correctly.
+	extractCmd := fmt.Sprintf("tar -xf '%s' -C '%s'", cygSrc, dst)
+	cmd := exec.Command(bashExe, "--login", "-c", extractCmd)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
@@ -1587,7 +1584,7 @@ func runAllPostinstall() {
 			dashExe := filepath.Join(CygwinRoot, "bin", "dash.exe")
 			cmd = exec.Command(dashExe, cygScript)
 		} else {
-			cmd = exec.Command(bashExe, cygScript)
+			cmd = exec.Command(bashExe, "--login", cygScript)
 		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -1601,7 +1598,7 @@ func runPreremove(name string) {
 	if _, err := os.Stat(script); err == nil {
 		fmt.Printf("Running pre-remove script for %s...\n", name)
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cmd := exec.Command(bashExe, toCygwinPath(script))
+		cmd := exec.Command(bashExe, "--login", toCygwinPath(script))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Run()
@@ -1625,7 +1622,7 @@ func checkHollow(pkg, archivePath string) error {
 		// a meta-package (safe). Only flag archives that are tiny AND binary-named.
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
 		cygSrc := toCygwinPath(archivePath)
-		out, _ := exec.Command(bashExe, "-c",
+		out, _ := exec.Command(bashExe, "--login", "-c",
 			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -ciE '\\.(dll|exe)$' || echo 0", cygSrc)).Output()
 		binCount := 0
 		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &binCount)
@@ -1658,7 +1655,7 @@ func checkHollow(pkg, archivePath string) error {
 		// Count non-directory entries
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
 		cygSrc := toCygwinPath(archivePath)
-		out, _ := exec.Command(bashExe, "-c",
+		out, _ := exec.Command(bashExe, "--login", "-c",
 			fmt.Sprintf("tar -tf '%s' 2>/dev/null | grep -vc '/$' || echo 0", cygSrc)).Output()
 		realFiles := 0
 		fmt.Sscanf(strings.TrimSpace(string(out)), "%d", &realFiles)
@@ -1729,7 +1726,7 @@ func verifyHash(pkg, path, sha512hash, md5hash string) error {
 		// MD5 verification via bash md5sum
 		fmt.Printf("Verifying md5sum     %s ... ", filepath.Base(path))
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		out, err := exec.Command(bashExe, "-c",
+		out, err := exec.Command(bashExe, "--login", "-c",
 			fmt.Sprintf("md5sum '%s' | awk '{print $1}'", toCygwinPath(path))).Output()
 		if err != nil {
 			return fmt.Errorf("md5sum error: %v", err)
