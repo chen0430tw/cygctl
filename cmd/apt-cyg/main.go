@@ -38,6 +38,18 @@ var (
 	optArch       = "x86_64"
 )
 
+// httpGet performs an HTTP GET with a browser-like User-Agent so that mirrors
+// whose CDN blocks Go's default "Go-http-client/1.1" UA (e.g. Tsinghua, USTC)
+// return 200 instead of 403.
+func httpGet(u string) (*http.Response, error) {
+	req, err := http.NewRequest("GET", u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) apt-cyg/"+Version)
+	return http.DefaultClient.Do(req)
+}
+
 // Global options set by command-line flags
 var opts struct {
 	NoDeps      bool
@@ -367,7 +379,7 @@ func tryDownloadSetup(filename string) bool {
 
 	fmt.Printf("  Trying %s ... ", filename)
 
-	resp, err := http.Get(u)
+	resp, err := httpGet(u)
 	if err != nil || resp.StatusCode != 200 {
 		if resp != nil {
 			resp.Body.Close()
@@ -955,7 +967,7 @@ func cmdSearchall(terms []string) {
 		u := fmt.Sprintf("https://cygwin.com/cgi-bin2/package-grep.cgi?text=1&arch=%s&grep=%s",
 			optArch, url.QueryEscape(term))
 
-		resp, err := http.Get(u)
+		resp, err := httpGet(u)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			continue
@@ -1865,7 +1877,7 @@ func readFileList(lstFile string) []string {
 }
 
 func downloadWithProgress(u, dest string, expectedSize int64) error {
-	resp, err := http.Get(u)
+	resp, err := httpGet(u)
 	if err != nil {
 		return err
 	}
