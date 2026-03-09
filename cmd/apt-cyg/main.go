@@ -20,18 +20,34 @@ import (
 )
 
 const (
-	CygwinRoot   = `C:\cygwin64`
-	CacheDir     = CygwinRoot + `\var\cache\apt-cyg`
-	SetupIni     = CacheDir + `\setup.ini`
-	InstalledDir = CygwinRoot + `\etc\setup`
-	Version      = "2.0.0"
+	Version = "2.0.0"
 
 	// Hollow-package thresholds (mirrors bash version)
 	hollowMinBytes  = 1024
 	hollowWarnBytes = 65536
 )
 
+// detectCygwinRoot returns the Cygwin installation root by inspecting the
+// path of the running executable (expected: $root\bin\apt-cyg.exe).
+// Falls back to C:\cygwin64 if detection fails.
+func detectCygwinRoot() string {
+	exe, err := os.Executable()
+	if err == nil {
+		// $root\bin\apt-cyg.exe → parent of bin\ is root
+		root := filepath.Dir(filepath.Dir(exe))
+		if _, err := os.Stat(filepath.Join(root, "etc", "setup")); err == nil {
+			return root
+		}
+	}
+	return `C:\cygwin64`
+}
+
 var (
+	CygwinRoot   = detectCygwinRoot()
+	CacheDir     = CygwinRoot + `\var\cache\apt-cyg`
+	SetupIni     = CacheDir + `\setup.ini`
+	InstalledDir = CygwinRoot + `\etc\setup`
+
 	DefaultMirror = "https://mirrors.kernel.org/sourceware/cygwin"
 	CurrentMirror = DefaultMirror
 	CurrentCache  = CacheDir
