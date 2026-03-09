@@ -202,6 +202,13 @@ Git Bash inherits Windows user env vars, so every new bash process — interacti
 > [!NOTE]
 > `BASH_ENV` takes effect for **new** processes. If your shell was already open when you ran the installer, open a new terminal window.
 
+> [!WARNING]
+> **Cygwin interactive shell gotcha:** Inside a Cygwin shell, `$HOME` is `/home/<user>` (i.e., `C:\cygwin64\home\<user>\`), while `.bash_env` lives under Windows `%USERPROFILE%` (`C:\Users\<user>\`). They are different directories, so a plain `source $HOME/.bash_env` won't find the file. The installer uses `cygpath` to bridge this:
+> ```bash
+> [ -f "$(cygpath -u "$USERPROFILE")/.bash_env" ] && source "$(cygpath -u "$USERPROFILE")/.bash_env"
+> ```
+> The install script handles this automatically. If you set up manually, add the line above to Cygwin's `~/.bashrc`.
+
 **Manual setup (if you installed binaries without the script):**
 
 ```powershell

@@ -168,9 +168,20 @@ if (Test-Path $bashrcPath) {
     Write-Host "  OK Created ~/.bashrc" -ForegroundColor Green
 }
 
-# 6. Cygwin ~/.bashrc — same source-line approach
+# 6. Cygwin ~/.bashrc
+# In Cygwin, $HOME is the Cygwin home (/home/<user>), NOT %USERPROFILE%.
+# We use cygpath to convert the Windows %USERPROFILE% path so the source line
+# resolves to the same ~/.bash_env that BASH_ENV points to.
 Write-Host "[6/6] Configuring Cygwin..." -ForegroundColor Green
 $cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
+$cygwinSourceLine = @"
+
+# Load Cygwin aliases — use cygpath so this resolves even though
+# `$HOME (Cygwin) != %USERPROFILE% (Windows).
+[ -f "`$(cygpath -u "`$USERPROFILE")/.bash_env" ] && source "`$(cygpath -u "`$USERPROFILE")/.bash_env"
+"@
+$cygwinSourceLineLF = $cygwinSourceLine.Replace("`r`n", "`n")
+
 if (Test-Path (Split-Path $cygwinBashrc)) {
     if (Test-Path $cygwinBashrc) {
         $content = Get-Content $cygwinBashrc -Raw
@@ -178,11 +189,11 @@ if (Test-Path (Split-Path $cygwinBashrc)) {
             Write-Host "  OK Cygwin ~/.bashrc already sources ~/.bash_env" -ForegroundColor Gray
         } else {
             $existing = [System.IO.File]::ReadAllText($cygwinBashrc)
-            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $bashrcSourceLineLF, $utf8NoBom)
+            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $cygwinSourceLineLF, $utf8NoBom)
             Write-Host "  OK Patched Cygwin ~/.bashrc" -ForegroundColor Green
         }
     } else {
-        [System.IO.File]::WriteAllText($cygwinBashrc, $bashrcSourceLineLF.TrimStart(), $utf8NoBom)
+        [System.IO.File]::WriteAllText($cygwinBashrc, $cygwinSourceLineLF.TrimStart(), $utf8NoBom)
         Write-Host "  OK Created Cygwin ~/.bashrc" -ForegroundColor Green
     }
 } else {
