@@ -319,7 +319,15 @@ func readSetupRC() {
 			}
 		case "last-cache":
 			if val != "" {
-				CurrentCache = val
+				// setup.rc may store a Cygwin path (e.g. /var/cache/apt-cyg).
+				// Go's os package needs Windows paths on Windows.
+				if strings.HasPrefix(val, "/") {
+					if wp, err := toWindowsPath(val); err == nil {
+						CurrentCache = wp
+					}
+				} else {
+					CurrentCache = val
+				}
 			}
 		}
 	}
@@ -1558,11 +1566,12 @@ func runAllPostinstall() {
 		fmt.Printf("Running %s\n", script)
 
 		var cmd *exec.Cmd
+		cygScript := toCygwinPath(script)
 		if strings.HasSuffix(name, ".dash") {
 			dashExe := filepath.Join(CygwinRoot, "bin", "dash.exe")
-			cmd = exec.Command(dashExe, script)
+			cmd = exec.Command(dashExe, cygScript)
 		} else {
-			cmd = exec.Command(bashExe, script)
+			cmd = exec.Command(bashExe, cygScript)
 		}
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
@@ -1576,7 +1585,7 @@ func runPreremove(name string) {
 	if _, err := os.Stat(script); err == nil {
 		fmt.Printf("Running pre-remove script for %s...\n", name)
 		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cmd := exec.Command(bashExe, script)
+		cmd := exec.Command(bashExe, toCygwinPath(script))
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		cmd.Run()
@@ -1947,6 +1956,13 @@ func humanSize(n int64) string {
 }
 
 func toCygwinPath(winPath string) string {
+	// Paths inside CygwinRoot map to / in the Cygwin namespace.
+	// e.g. C:\cygwin64\var\cache\... → /var/cache/...
+	if strings.HasPrefix(strings.ToLower(winPath), strings.ToLower(CygwinRoot)) {
+		rel := winPath[len(CygwinRoot):]
+		return strings.ReplaceAll(rel, `\`, "/")
+	}
+	// General Windows drive path → /cygdrive/X/...
 	cygPath := strings.ReplaceAll(winPath, `\`, "/")
 	if len(cygPath) >= 2 && cygPath[1] == ':' {
 		cygPath = "/cygdrive/" + strings.ToLower(string(cygPath[0])) + cygPath[2:]
