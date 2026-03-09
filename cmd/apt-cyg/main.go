@@ -1972,11 +1972,16 @@ func humanSize(n int64) string {
 }
 
 func toCygwinPath(winPath string) string {
-	// Use mixed-style paths (C:/path/...) rather than Cygwin virtual paths
-	// (/var/...) or /cygdrive/c/... notation. When bash.exe is spawned from
-	// a native Windows process, Cygwin virtual mounts are not reliably
-	// accessible, but Windows drive paths with forward slashes are always
-	// understood by bash and Cygwin tools.
+	// Convert to Cygwin /cygdrive/<drive>/... format.
+	// Mixed-style "C:/path" causes tar to interpret "C:" as a remote hostname
+	// and fail with "Cannot connect to C: resolve failed".
+	// /cygdrive is a hard-coded Cygwin mount and always accessible even when
+	// bash.exe is spawned from a native Windows process.
+	if len(winPath) >= 2 && winPath[1] == ':' {
+		drive := strings.ToLower(string(winPath[0]))
+		rest := strings.ReplaceAll(winPath[2:], `\`, "/")
+		return "/cygdrive/" + drive + rest
+	}
 	return strings.ReplaceAll(winPath, `\`, "/")
 }
 
