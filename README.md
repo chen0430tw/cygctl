@@ -30,6 +30,25 @@ irm https://raw.githubusercontent.com/chen0430tw/cygctl/master/install.ps1 | iex
 
 Restart your terminal after installation to use `cyg` and `apt` commands.
 
+> [!WARNING]
+> **PowerShell execution policy error (common gotcha)**
+>
+> If you see this error after installation:
+> ```
+> ...Microsoft.PowerShell_profile.ps1 cannot be loaded because running scripts is disabled on this system.
+> ```
+> Windows defaults to the `Restricted` execution policy, which blocks profile scripts from loading. The installer automatically sets your **current-user** policy to `RemoteSigned` (allows local scripts; still blocks unsigned scripts downloaded from the internet). If you installed manually or hit this error, run once in PowerShell:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
+> ```
+> Then open a new terminal.
+
+> [!NOTE]
+> **Cygwin installed on a drive other than C:\?** The installer reads the installation path from the registry (written by Cygwin's setup.exe), so it finds the correct location automatically. If auto-detection fails, pass the path explicitly:
+> ```powershell
+> .\install.ps1 -CygwinRoot D:\cygwin64
+> ```
+
 ## Manual Install
 
 ```powershell
@@ -201,6 +220,13 @@ Git Bash inherits Windows user env vars, so every new bash process — interacti
 
 > [!NOTE]
 > `BASH_ENV` takes effect for **new** processes. If your shell was already open when you ran the installer, open a new terminal window.
+
+> [!WARNING]
+> **Cygwin interactive shell gotcha:** Inside a Cygwin shell, `$HOME` is `/home/<user>` (i.e., `C:\cygwin64\home\<user>\`), while `.bash_env` lives under Windows `%USERPROFILE%` (`C:\Users\<user>\`). They are different directories, so a plain `source $HOME/.bash_env` won't find the file. The installer uses `cygpath` to bridge this:
+> ```bash
+> [ -f "$(cygpath -u "$USERPROFILE")/.bash_env" ] && source "$(cygpath -u "$USERPROFILE")/.bash_env"
+> ```
+> The install script handles this automatically. If you set up manually, add the line above to Cygwin's `~/.bashrc`.
 
 **Manual setup (if you installed binaries without the script):**
 
