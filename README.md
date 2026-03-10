@@ -9,6 +9,25 @@ English | [简体中文](./README.zh-CN.md)
 > It is a control tool for running commands inside an **already-installed Cygwin environment**, with a WSL-like interface.
 > To install Cygwin, visit [cygwin.com](https://www.cygwin.com). To install WSL, see the [Microsoft documentation](https://learn.microsoft.com/windows/wsl/install).
 
+## Why Cygwin and not WSL?
+
+Short answer: if you can use WSL, use WSL. cygctl is for the cases where you can't or don't want to.
+
+| | Cygwin + cygctl | WSL 2 |
+|---|---|---|
+| **Process model** | Native Windows processes — visible in Task Manager, inherit Windows env vars, manageable with any Windows tool | Linux processes inside a Hyper-V VM |
+| **Filesystem** | Works directly on NTFS paths (`C:\...`), inherits Windows ACLs | Separate ext4 VHD; cross-OS access via 9P (slow for heavy I/O) |
+| **RAM overhead** | None — no hypervisor | VM reserves memory (default: 50% of RAM or 8 GB) |
+| **Windows tool interop** | Cygwin and `cmd`/PowerShell tools share the same process space and handles | Requires `wsl.exe` bridge or Windows interop hacks |
+| **Corporate / locked-down machines** | Cygwin is plain Win32 DLLs; works even when Hyper-V is disabled by policy | Requires Hyper-V / Virtual Machine Platform feature — often blocked |
+| **Already have Cygwin** | cygctl gives it a scriptable, pipeable interface | Adds a second Linux environment you might not need |
+
+**Use WSL if:** you need a real Linux kernel (Docker, eBPF, kernel modules), full glibc compatibility, or a specific Linux distro.
+
+**Use Cygwin + cygctl if:** you already have Cygwin, you're on a machine where Hyper-V is unavailable, you need to manage Windows-native files and ACLs from a Unix shell, or you're building CI/CD pipelines that must run as specific Windows users via `su`/`sudo`.
+
+---
+
 **cygctl is not a shell alias or a shim.** A naive `alias cyg='bash.exe'` breaks the moment you pipe data, check exit codes, or need to switch users. cygctl is a purpose-built binary that handles:
 
 - **Correct stdio wiring** — stdin/stdout/stderr are connected properly so pipes and redirections work as expected
@@ -105,6 +124,17 @@ cyg ls -la /tmp
 ```
 
 ### Package Management (apt-cyg)
+
+> [!WARNING]
+> **`apt update` fails with permission denied?**
+>
+> If Cygwin was installed under a specific user account (e.g. `asus`), that account may be the only one with write access to `C:\cygwin64`. Running `sudo apt update` as `Administrators` will fail because the Administrators group is not in the ACL.
+>
+> Fix — run once in an elevated PowerShell or CMD:
+> ```powershell
+> icacls "C:\cygwin64" /grant "Administrators:(OI)(CI)F" /T
+> ```
+> This grants the Administrators group full access recursively. After that, `sudo apt update` and `sudo apt install` will work correctly.
 
 ```bash
 apt update               # Update package list
