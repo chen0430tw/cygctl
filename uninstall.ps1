@@ -56,7 +56,7 @@ $InstallDir = Join-Path $CygwinRoot "bin"
 Write-Host "=== Cygctl Uninstaller ===" -ForegroundColor Cyan
 Write-Host ""
 
-$Binaries = @("cygctl.exe", "apt-cyg.exe", "sudo.exe", "su.exe")
+$Binaries = @("cygctl.exe", "apt-cyg.exe", "sudo.exe", "su.exe", "apt.exe", "cyg.exe")
 
 # 1. Remove binaries
 Write-Host "[1/6] Removing binaries..." -ForegroundColor Green

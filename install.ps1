@@ -96,6 +96,27 @@ foreach ($binary in $Binaries) {
     }
 }
 
+# Create apt.exe and cyg.exe hardlinks so 'sudo apt' / 'sudo cyg' work.
+# sudo.exe is a separate Win32 process — it cannot see PowerShell functions,
+# so it needs real executables in PATH.
+$hardlinks = @{ "apt.exe" = "apt-cyg.exe"; "cyg.exe" = "cygctl.exe" }
+foreach ($link in $hardlinks.GetEnumerator()) {
+    $linkPath   = Join-Path $InstallDir $link.Key
+    $targetPath = Join-Path $InstallDir $link.Value
+    if (Test-Path $linkPath) {
+        Write-Host "  OK $($link.Key) already exists" -ForegroundColor Gray
+    } elseif (Test-Path $targetPath) {
+        try {
+            New-Item -ItemType HardLink -Path $linkPath -Target $targetPath -Force | Out-Null
+            Write-Host "  OK Created hardlink $($link.Key) -> $($link.Value)" -ForegroundColor Green
+        } catch {
+            Write-Host "  WARN Could not create hardlink $($link.Key): $_" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  SKIP $($link.Value) not found, skipping $($link.Key)" -ForegroundColor Gray
+    }
+}
+
 # 2. Add to machine-wide PATH (all users)
 Write-Host "[2/6] Configuring PATH..." -ForegroundColor Green
 $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
