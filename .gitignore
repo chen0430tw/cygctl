@@ -7,6 +7,10 @@
 
 # Build
 /cygctl
+cmd/apt-cyg/apt-cyg
+cmd/su/su
+cmd/sudo/sudo
+cmd/cygctl/cygctl
 go.work.sum
 
 # IDE

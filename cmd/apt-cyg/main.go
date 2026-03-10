@@ -1321,7 +1321,17 @@ func cmdRemove(names []string) {
 		}
 		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 		for _, d := range dirs {
-			os.Remove(filepath.Join(CygwinRoot, filepath.FromSlash(d))) // ignore error if not empty
+			p := filepath.Join(CygwinRoot, filepath.FromSlash(d))
+			// Skip junction points and symlinks (e.g. Cygwin's /usr/bin → /bin).
+			// On Windows, RemoveDirectory succeeds on a junction regardless of
+			// whether the target is empty, which would silently delete the junction
+			// and break the Cygwin installation.  filepath.EvalSymlinks follows
+			// reparse points; if the resolved path differs from p, the entry is a
+			// junction or symlink — leave it alone.
+			if resolved, err := filepath.EvalSymlinks(p); err == nil && !strings.EqualFold(resolved, p) {
+				continue
+			}
+			os.Remove(p) // ignore error if not empty or non-existent
 		}
 
 		// Remove postinstall done marker
@@ -1986,8 +1996,17 @@ func toCygwinPath(winPath string) string {
 // or "usr/bin/sl.exe" to the corresponding native Windows path under CygwinRoot.
 // This is needed because Go is compiled as a native Windows binary and os.* functions
 // use Win32 API which does not understand POSIX paths like "/usr/bin/sl.exe".
+//
+// It uses cygpath -w to resolve Cygwin symlinks such as /usr/bin → /bin, so that
+// e.g. "./usr/bin/sl.exe" correctly maps to C:\cygwin64\bin\sl.exe instead of
+// the non-existent C:\cygwin64\usr\bin\sl.exe.
 func cygRelToWindowsPath(f string) string {
 	rel := strings.TrimPrefix(f, "./")
+	absPath := "/" + strings.TrimPrefix(rel, "/")
+	if wp, err := toWindowsPath(absPath); err == nil {
+		return wp
+	}
+	// Fallback: plain join (works when cygpath is unavailable, e.g. in tests)
 	return filepath.Join(CygwinRoot, filepath.FromSlash(rel))
 }
 
