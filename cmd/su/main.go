@@ -285,7 +285,11 @@ func runClient(args []string) int {
 
 	var cmd *exec.Cmd
 	if len(cmdArgs) > 0 {
-		cmd = exec.Command(bashExe, "--login", "-c", strings.Join(cmdArgs, " "))
+		// Run the command directly (like sudo does) to avoid MSYS2 path
+		// conversion mangling Windows-style paths (e.g. C:\cygwin64 → /cygwin64).
+		// Routing through bash --login -c would subject arguments to Git Bash /
+		// MSYS2 path rewriting unless MSYS_NO_PATHCONV=1 is set.
+		cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	} else {
 		cmd = exec.Command(bashExe, "--login", "-i")
 	}
