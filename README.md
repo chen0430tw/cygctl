@@ -139,6 +139,9 @@ cyg --user alice --cd "D:\Projects"
 
 > **Note:** `su` uses `CreateProcessWithLogonW` and requires the Windows Secondary Logon service (`seclogon`) to be running. It is enabled by default on all modern Windows versions.
 
+> [!WARNING]
+> **Accounts with empty passwords cannot log in via `su`.** Windows security policy (`LimitBlankPasswordUse`) restricts blank-password accounts to local interactive logon (console) only; network/service logon — which `CreateProcessWithLogonW` uses — is blocked. To use `su`, the target account must have a password set.
+
 ### WSL Integration (cyg wsl)
 
 `cyg wsl` lets you manage and interact with WSL from within Cygwin.
