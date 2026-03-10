@@ -1986,8 +1986,17 @@ func toCygwinPath(winPath string) string {
 // or "usr/bin/sl.exe" to the corresponding native Windows path under CygwinRoot.
 // This is needed because Go is compiled as a native Windows binary and os.* functions
 // use Win32 API which does not understand POSIX paths like "/usr/bin/sl.exe".
+//
+// It uses cygpath -w to resolve Cygwin symlinks such as /usr/bin → /bin, so that
+// e.g. "./usr/bin/sl.exe" correctly maps to C:\cygwin64\bin\sl.exe instead of
+// the non-existent C:\cygwin64\usr\bin\sl.exe.
 func cygRelToWindowsPath(f string) string {
 	rel := strings.TrimPrefix(f, "./")
+	absPath := "/" + strings.TrimPrefix(rel, "/")
+	if wp, err := toWindowsPath(absPath); err == nil {
+		return wp
+	}
+	// Fallback: plain join (works when cygpath is unavailable, e.g. in tests)
 	return filepath.Join(CygwinRoot, filepath.FromSlash(rel))
 }
 
