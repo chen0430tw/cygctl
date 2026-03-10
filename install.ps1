@@ -199,6 +199,18 @@ if ($currentBashEnv -ne '%USERPROFILE%\.bash_env') {
     Write-Host "  OK BASH_ENV already configured" -ForegroundColor Gray
 }
 
+# Git Bash (MSYS2 runtime) defaults to 'minimal' PATH mode, which only inherits
+# critical Windows system directories — not machine-level user-installed programs
+# (like C:\cygwin64\bin). Setting MSYS2_PATH_TYPE=inherit makes Git Bash include
+# the full Windows PATH so cygctl tools are found without extra configuration.
+$currentMsysPathType = [Environment]::GetEnvironmentVariable("MSYS2_PATH_TYPE", "Machine")
+if ($currentMsysPathType -ne 'inherit') {
+    [Environment]::SetEnvironmentVariable("MSYS2_PATH_TYPE", "inherit", "Machine")
+    Write-Host "  OK Set MSYS2_PATH_TYPE=inherit (Git Bash will inherit full PATH)" -ForegroundColor Green
+} else {
+    Write-Host "  OK MSYS2_PATH_TYPE already set to inherit" -ForegroundColor Gray
+}
+
 # Patch ~/.bashrc to source ~/.bash_env for interactive Git Bash sessions.
 # Must appear before any early-exit guard (case $- in *i*) ;; *) return ;; esac).
 $bashrcPath = "$env:USERPROFILE\.bashrc"
