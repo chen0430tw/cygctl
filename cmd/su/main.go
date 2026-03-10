@@ -289,6 +289,16 @@ func runClient(args []string) int {
 		// conversion mangling Windows-style paths (e.g. C:\cygwin64 → /cygwin64).
 		// Routing through bash --login -c would subject arguments to Git Bash /
 		// MSYS2 path rewriting unless MSYS_NO_PATHCONV=1 is set.
+		//
+		// When the caller passes a single quoted shell string
+		// (e.g. su user "icacls C:\cygwin64 /grant ..."), cmdArgs has one
+		// element containing the whole command.  Split it with Windows
+		// command-line parsing rules so we can still exec directly.
+		if len(cmdArgs) == 1 {
+			if parts, err := windows.DecomposeCommandLine(cmdArgs[0]); err == nil && len(parts) > 1 {
+				cmdArgs = parts
+			}
+		}
 		cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	} else {
 		cmd = exec.Command(bashExe, "--login", "-i")

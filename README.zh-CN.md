@@ -9,6 +9,25 @@
 > 它是一个控制工具，用于在**已安装的 Cygwin 环境**中执行命令，提供类似 WSL 的接口。
 > 如需安装 Cygwin，请访问 [cygwin.com](https://www.cygwin.com)。如需安装 WSL，请参阅 [Microsoft 文档](https://learn.microsoft.com/windows/wsl/install)。
 
+## 为什么是 Cygwin 而不是 WSL？
+
+简短回答：如果你能用 WSL，就用 WSL。cygctl 是为那些用不了或不想用 WSL 的场景准备的。
+
+| | Cygwin + cygctl | WSL 2 |
+|---|---|---|
+| **进程模型** | 原生 Windows 进程 —— 在任务管理器中可见，继承 Windows 环境变量，可用任何 Windows 工具管理 | 运行在 Hyper-V 虚拟机内的 Linux 进程 |
+| **文件系统** | 直接操作 NTFS 路径（`C:\...`），继承 Windows ACL | 独立的 ext4 VHD；跨系统访问通过 9P 协议（大量 I/O 时较慢） |
+| **内存占用** | 无 —— 没有 Hypervisor | 虚拟机预占内存（默认 50% 系统 RAM 或 8 GB） |
+| **Windows 工具互操作** | Cygwin 与 `cmd`/PowerShell 工具共享同一进程空间和句柄 | 需要 `wsl.exe` 桥接或 Windows interop 方案 |
+| **企业/受限机器** | Cygwin 是纯 Win32 DLL，即便 Hyper-V 被策略禁用也能运行 | 需要 Hyper-V / Virtual Machine Platform 功能，在很多企业环境中被禁 |
+| **已有 Cygwin** | cygctl 为其提供可脚本化、可管道化的接口 | 额外引入一套你可能不需要的 Linux 环境 |
+
+**选 WSL 的情况：** 需要真实的 Linux 内核（Docker、eBPF、内核模块）、完整 glibc 兼容性，或特定 Linux 发行版。
+
+**选 Cygwin + cygctl 的情况：** 已有 Cygwin 安装；机器上 Hyper-V 不可用；需要在 Unix Shell 中直接管理 Windows 文件和 ACL；构建需要通过 `su`/`sudo` 以特定 Windows 用户运行的 CI/CD 流水线。
+
+---
+
 **cygctl 不是 shell alias，也不是 shim 垫片。** 简单的 `alias cyg='bash.exe'` 在涉及管道、退出码或用户切换时就会失效。cygctl 是一个专门构建的二进制工具，负责处理：
 
 - **正确的 stdio 连接** — stdin/stdout/stderr 被正确绑定，管道和重定向按预期工作
@@ -109,6 +128,17 @@ cyg ls -la /tmp
 ```
 
 ### 包管理（apt-cyg）
+
+> [!WARNING]
+> **`apt update` 报权限错误？**
+>
+> 如果 Cygwin 是由某个特定用户（例如 `asus`）安装的，`C:\cygwin64` 的 ACL 可能只给了该用户写权限，Administrators 组不在列表中。以该组身份执行 `sudo apt update` 时就会失败。
+>
+> 解决方法 —— 在提权后的 PowerShell 或 CMD 中执行一次：
+> ```powershell
+> icacls "C:\cygwin64" /grant "Administrators:(OI)(CI)F" /T
+> ```
+> 这会递归地将完全控制权授予 Administrators 组。之后 `sudo apt update` 和 `sudo apt install` 即可正常工作。
 
 ```bash
 apt update               # 更新包列表
