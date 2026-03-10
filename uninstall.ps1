@@ -147,6 +147,15 @@ if ($currentBashEnv -eq '%USERPROFILE%\.bash_env') {
     Write-Host "  OK BASH_ENV not set by us" -ForegroundColor Gray
 }
 
+# Remove MSYS2_PATH_TYPE=inherit (only if we set it)
+$currentMsysPathType = [Environment]::GetEnvironmentVariable("MSYS2_PATH_TYPE", "Machine")
+if ($currentMsysPathType -eq 'inherit') {
+    [Environment]::SetEnvironmentVariable("MSYS2_PATH_TYPE", $null, "Machine")
+    Write-Host "  OK Cleared MSYS2_PATH_TYPE" -ForegroundColor Green
+} else {
+    Write-Host "  OK MSYS2_PATH_TYPE not set by us" -ForegroundColor Gray
+}
+
 # Remove source line from ~/.bashrc
 $bashrcPath = "$env:USERPROFILE\.bashrc"
 if (Test-Path $bashrcPath) {
