@@ -11,11 +11,47 @@
 #>
 
 param(
-    [string]$InstallDir = "C:\cygwin64\bin",
+    [string]$CygwinRoot = "",   # auto-detected from registry if omitted
     [switch]$Verify
 )
 
 $ErrorActionPreference = "Stop"
+
+# Require administrator privileges for machine-wide uninstallation
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Error: Administrator privileges required." -ForegroundColor Red
+    Write-Host "  Right-click PowerShell and choose 'Run as administrator', then re-run." -ForegroundColor Yellow
+    exit 1
+}
+
+# Auto-detect Cygwin installation root
+if (-not $CygwinRoot) {
+    $regPaths = @(
+        "HKLM:\SOFTWARE\Cygwin\setup",
+        "HKCU:\SOFTWARE\Cygwin\setup",
+        "HKLM:\SOFTWARE\WOW6432Node\Cygwin\setup"
+    )
+    foreach ($rp in $regPaths) {
+        $key = Get-ItemProperty $rp -ErrorAction SilentlyContinue
+        if ($key -and $key.rootdir -and (Test-Path $key.rootdir)) {
+            $CygwinRoot = $key.rootdir.TrimEnd('\')
+            break
+        }
+    }
+}
+if (-not $CygwinRoot) {
+    $candidates = @("C:\cygwin64", "C:\cygwin", "D:\cygwin64", "D:\cygwin")
+    foreach ($c in $candidates) {
+        if (Test-Path $c) { $CygwinRoot = $c; break }
+    }
+}
+if (-not $CygwinRoot) {
+    Write-Host "Warning: Cygwin installation not found; skipping Cygwin cleanup." -ForegroundColor Yellow
+    $CygwinRoot = "C:\cygwin64"   # placeholder so path variables don't error
+}
+
+$InstallDir = Join-Path $CygwinRoot "bin"
 
 Write-Host "=== Cygctl Uninstaller ===" -ForegroundColor Cyan
 Write-Host ""
@@ -34,20 +70,20 @@ foreach ($binary in $Binaries) {
     }
 }
 
-# 2. Remove from PATH
+# 2. Remove from machine-wide PATH
 Write-Host "[2/6] Cleaning PATH..." -ForegroundColor Green
-$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($userPath -like "*$InstallDir*") {
-    $newPath = ($userPath -split ';' | Where-Object { $_ -and $_ -notlike "*$InstallDir*" }) -join ';'
-    [Environment]::SetEnvironmentVariable("PATH", $newPath, "User")
-    Write-Host "  OK Removed from PATH" -ForegroundColor Green
+$machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+if ($machinePath -like "*$InstallDir*") {
+    $newPath = ($machinePath -split ';' | Where-Object { $_ -and $_ -notlike "*$InstallDir*" }) -join ';'
+    [Environment]::SetEnvironmentVariable("PATH", $newPath, "Machine")
+    Write-Host "  OK Removed from machine PATH" -ForegroundColor Green
 } else {
-    Write-Host "  OK Not in PATH" -ForegroundColor Gray
+    Write-Host "  OK Not in machine PATH" -ForegroundColor Gray
 }
 
-# 3. Remove PowerShell profile aliases
+# 3. Remove PowerShell profile aliases (all-users profile)
 Write-Host "[3/6] Cleaning PowerShell..." -ForegroundColor Green
-$profilePath = $PROFILE
+$profilePath = $PROFILE.AllUsersAllHosts
 if (Test-Path $profilePath) {
     $content = Get-Content $profilePath -Raw
     if ($content -match "function cyg") {
@@ -69,9 +105,9 @@ if (Test-Path $profilePath) {
     Write-Host "  OK No profile found" -ForegroundColor Gray
 }
 
-# 4. Remove CMD macros
+# 4. Remove CMD macros (machine-wide)
 Write-Host "[4/6] Cleaning CMD..." -ForegroundColor Green
-$macrosFile = "$env:USERPROFILE\cmd_macros.doskey"
+$macrosFile = "$env:ProgramData\cygctl\cmd_macros.doskey"
 if (Test-Path $macrosFile) {
     Remove-Item $macrosFile -Force
     Write-Host "  OK Removed macros file" -ForegroundColor Green
@@ -79,7 +115,7 @@ if (Test-Path $macrosFile) {
     Write-Host "  OK No macros file" -ForegroundColor Gray
 }
 
-$regPath = "HKCU:\Software\Microsoft\Command Processor"
+$regPath = "HKLM:\Software\Microsoft\Command Processor"
 $autoRun = Get-ItemProperty -Path $regPath -ErrorAction SilentlyContinue
 if ($autoRun -and $autoRun.AutoRun -like '*cmd_macros*') {
     Remove-ItemProperty -Path $regPath -Name "AutoRun" -ErrorAction SilentlyContinue
@@ -102,10 +138,10 @@ if (Test-Path $bashEnvPath) {
     Write-Host "  OK ~/.bash_env not found" -ForegroundColor Gray
 }
 
-# Unset BASH_ENV (only if we set it — check it points to our file)
-$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "User")
-if ($currentBashEnv -like "*\.bash_env") {
-    [Environment]::SetEnvironmentVariable("BASH_ENV", $null, "User")
+# Unset machine-wide BASH_ENV (only if we set it)
+$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "Machine")
+if ($currentBashEnv -eq '%USERPROFILE%\.bash_env') {
+    [Environment]::SetEnvironmentVariable("BASH_ENV", $null, "Machine")
     Write-Host "  OK Cleared BASH_ENV" -ForegroundColor Green
 } else {
     Write-Host "  OK BASH_ENV not set by us" -ForegroundColor Gray
@@ -132,26 +168,14 @@ if (Test-Path $bashrcPath) {
     Write-Host "  OK ~/.bashrc not found" -ForegroundColor Gray
 }
 
-# 6. Remove Cygwin bash aliases
+# 6. Remove Cygwin /etc/profile.d/cygctl.sh (all users)
 Write-Host "[6/6] Cleaning Cygwin..." -ForegroundColor Green
-$cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
-if (Test-Path $cygwinBashrc) {
-    $content = Get-Content $cygwinBashrc -Raw
-    if ($content -match "\.bash_env") {
-        $newContent = $content -replace '(?s)(\r?\n)?# Load Cygwin aliases[^\n]*\r?\n\[ -f "[^"]*\.bash_env" \] && source "[^"]*\.bash_env"\r?\n?', ''
-        $newContent = $newContent -replace '^\r?\n', ''
-        if ($newContent.Trim() -eq '') {
-            Remove-Item $cygwinBashrc -Force
-            Write-Host "  OK Removed Cygwin ~/.bashrc (was only aliases)" -ForegroundColor Green
-        } else {
-            [System.IO.File]::WriteAllText($cygwinBashrc, $newContent, $utf8NoBom)
-            Write-Host "  OK Patched Cygwin ~/.bashrc" -ForegroundColor Green
-        }
-    } else {
-        Write-Host "  OK Cygwin ~/.bashrc has no cygctl entries" -ForegroundColor Gray
-    }
+$cygctlProfileD = "$CygwinRoot\etc\profile.d\cygctl.sh"
+if (Test-Path $cygctlProfileD) {
+    Remove-Item $cygctlProfileD -Force
+    Write-Host "  OK Removed /etc/profile.d/cygctl.sh" -ForegroundColor Green
 } else {
-    Write-Host "  SKIP Cygwin .bashrc not found" -ForegroundColor Gray
+    Write-Host "  SKIP /etc/profile.d/cygctl.sh not found" -ForegroundColor Gray
 }
 
 # Done
@@ -176,16 +200,16 @@ if ($issues.Count -eq 0 -or -not ($issues | Where-Object { $_ -like "Binary*" })
 }
 
 # Check PATH
-$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($userPath -like "*$InstallDir*") {
+$machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+if ($machinePath -like "*$InstallDir*") {
     $issues += "PATH still contains: $InstallDir"
-    Write-Host "  [FAIL] PATH still contains cygwin" -ForegroundColor Red
+    Write-Host "  [FAIL] machine PATH still contains cygwin" -ForegroundColor Red
 } else {
     Write-Host "  [OK] PATH clean" -ForegroundColor Green
 }
 
 # Check PowerShell profile
-$profilePath = $PROFILE
+$profilePath = $PROFILE.AllUsersAllHosts
 if (Test-Path $profilePath) {
     $content = Get-Content $profilePath -Raw
     if ($content -match "function cyg") {
@@ -199,7 +223,7 @@ if (Test-Path $profilePath) {
 }
 
 # Check CMD macros
-$macrosFile = "$env:USERPROFILE\cmd_macros.doskey"
+$macrosFile = "$env:ProgramData\cygctl\cmd_macros.doskey"
 if (Test-Path $macrosFile) {
     $issues += "CMD macros file still exists"
     Write-Host "  [FAIL] CMD macros file still exists" -ForegroundColor Red
@@ -217,9 +241,9 @@ if (Test-Path $bashEnvPath) {
 }
 
 # Check BASH_ENV cleared
-$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "User")
-if ($currentBashEnv -like "*\.bash_env") {
-    $issues += "BASH_ENV still points to cygctl file"
+$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "Machine")
+if ($currentBashEnv -eq '%USERPROFILE%\.bash_env') {
+    $issues += "BASH_ENV still set machine-wide"
     Write-Host "  [FAIL] BASH_ENV not cleared" -ForegroundColor Red
 } else {
     Write-Host "  [OK] BASH_ENV clear" -ForegroundColor Green
@@ -239,18 +263,13 @@ if (Test-Path $bashrcPath) {
     Write-Host "  [OK] Git Bash .bashrc clean (no file)" -ForegroundColor Green
 }
 
-# Check Cygwin ~/.bashrc
-$cygwinBashrc = "C:\cygwin64\home\$env:USERNAME\.bashrc"
-if (Test-Path $cygwinBashrc) {
-    $content = Get-Content $cygwinBashrc -Raw
-    if ($content -match "\.bash_env") {
-        $issues += "Cygwin .bashrc still references .bash_env"
-        Write-Host "  [FAIL] Cygwin .bashrc still references .bash_env" -ForegroundColor Red
-    } else {
-        Write-Host "  [OK] Cygwin .bashrc clean" -ForegroundColor Green
-    }
+# Check Cygwin /etc/profile.d/cygctl.sh
+$cygctlProfileD = "$CygwinRoot\etc\profile.d\cygctl.sh"
+if (Test-Path $cygctlProfileD) {
+    $issues += "/etc/profile.d/cygctl.sh still exists"
+    Write-Host "  [FAIL] /etc/profile.d/cygctl.sh still exists" -ForegroundColor Red
 } else {
-    Write-Host "  [OK] Cygwin .bashrc clean (no file)" -ForegroundColor Green
+    Write-Host "  [OK] /etc/profile.d/cygctl.sh removed" -ForegroundColor Green
 }
 
 Write-Host ""

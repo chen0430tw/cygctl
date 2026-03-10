@@ -17,6 +17,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Require administrator privileges for machine-wide installation
+$currentPrincipal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Write-Host "Error: Administrator privileges required for system-wide installation." -ForegroundColor Red
+    Write-Host "  Right-click PowerShell and choose 'Run as administrator', then re-run." -ForegroundColor Yellow
+    exit 1
+}
+
 Write-Host "=== Cygctl Installer ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -88,31 +96,30 @@ foreach ($binary in $Binaries) {
     }
 }
 
-# 2. Add to PATH
+# 2. Add to machine-wide PATH (all users)
 Write-Host "[2/6] Configuring PATH..." -ForegroundColor Green
-$userPath = [Environment]::GetEnvironmentVariable("PATH", "User")
-if ($userPath -like "*$InstallDir*") {
-    Write-Host "  OK Already in PATH" -ForegroundColor Gray
+$machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+if ($machinePath -like "*$InstallDir*") {
+    Write-Host "  OK Already in machine PATH" -ForegroundColor Gray
 } else {
-    [Environment]::SetEnvironmentVariable("PATH", "$InstallDir;$userPath", "User")
-    Write-Host "  OK Added to PATH" -ForegroundColor Green
+    [Environment]::SetEnvironmentVariable("PATH", "$InstallDir;$machinePath", "Machine")
+    Write-Host "  OK Added to machine PATH (all users)" -ForegroundColor Green
 }
 
-# 3. PowerShell profile
+# 3. PowerShell profile (all users)
 Write-Host "[3/6] Configuring PowerShell..." -ForegroundColor Green
 
-# Ensure scripts can run. Windows defaults to Restricted, which blocks profile loading.
-# RemoteSigned allows local scripts (including $PROFILE) while still blocking unsigned
-# scripts downloaded from the internet.
-$execPolicy = Get-ExecutionPolicy -Scope CurrentUser
+# Ensure scripts can run for all users. RemoteSigned allows local scripts
+# (including the all-users profile) while blocking unsigned internet scripts.
+$execPolicy = Get-ExecutionPolicy -Scope LocalMachine
 if ($execPolicy -eq "Restricted" -or $execPolicy -eq "Undefined") {
-    Set-ExecutionPolicy -Scope CurrentUser -ExecutionPolicy RemoteSigned -Force
-    Write-Host "  OK Set execution policy to RemoteSigned (was: $execPolicy)" -ForegroundColor Green
+    Set-ExecutionPolicy -Scope LocalMachine -ExecutionPolicy RemoteSigned -Force
+    Write-Host "  OK Set machine execution policy to RemoteSigned (was: $execPolicy)" -ForegroundColor Green
 } else {
-    Write-Host "  OK Execution policy: $execPolicy" -ForegroundColor Gray
+    Write-Host "  OK Machine execution policy: $execPolicy" -ForegroundColor Gray
 }
 
-$profilePath = $PROFILE
+$profilePath = $PROFILE.AllUsersAllHosts
 $profileDir = Split-Path $profilePath -Parent
 
 if (-not (Test-Path $profileDir)) {
@@ -139,19 +146,23 @@ if (Test-Path $profilePath) {
     Write-Host "  OK Created profile" -ForegroundColor Green
 }
 
-# 4. CMD macros
+# 4. CMD macros (all users via HKLM)
 Write-Host "[4/6] Configuring CMD..." -ForegroundColor Green
-$macrosFile = "$env:USERPROFILE\cmd_macros.doskey"
+$macrosDir = "$env:ProgramData\cygctl"
+$macrosFile = "$macrosDir\cmd_macros.doskey"
 $macrosContent = "cyg=cygctl.exe `$*`napt=apt-cyg.exe `$*`n"
 
+if (-not (Test-Path $macrosDir)) {
+    New-Item -ItemType Directory -Path $macrosDir -Force | Out-Null
+}
 Set-Content -Path $macrosFile -Value $macrosContent -Force
 
-$regPath = "HKCU:\Software\Microsoft\Command Processor"
+$regPath = "HKLM:\Software\Microsoft\Command Processor"
 if (-not (Test-Path $regPath)) {
     New-Item -Path $regPath -Force | Out-Null
 }
 Set-ItemProperty -Path $regPath -Name "AutoRun" -Value "doskey /macrofile=`"$macrosFile`""
-Write-Host "  OK Created CMD macros" -ForegroundColor Green
+Write-Host "  OK Created CMD macros (all users)" -ForegroundColor Green
 
 # 5. Shell aliases via ~/.bash_env + BASH_ENV env var
 # This makes aliases available in BOTH interactive shells and non-interactive subprocesses
@@ -178,12 +189,12 @@ alias su='su.exe'
 [System.IO.File]::WriteAllText($bashEnvPath, $bashEnvContent.Replace("`r`n", "`n").TrimStart(), $utf8NoBom)
 Write-Host "  OK Written ~/.bash_env" -ForegroundColor Green
 
-# Set BASH_ENV so every non-interactive bash (agents, subprocesses, pipes) auto-sources ~/.bash_env.
-# Git Bash inherits Windows user env vars, so this takes effect in new processes immediately.
-$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "User")
-if ($currentBashEnv -ne "$env:USERPROFILE\.bash_env") {
-    [Environment]::SetEnvironmentVariable("BASH_ENV", "$env:USERPROFILE\.bash_env", "User")
-    Write-Host "  OK Set BASH_ENV" -ForegroundColor Green
+# Set BASH_ENV machine-wide so every non-interactive bash auto-sources ~/.bash_env.
+# Using %USERPROFILE% (unexpanded) so Windows expands it per-user at process creation time.
+$currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "Machine")
+if ($currentBashEnv -ne '%USERPROFILE%\.bash_env') {
+    [Environment]::SetEnvironmentVariable("BASH_ENV", '%USERPROFILE%\.bash_env', "Machine")
+    Write-Host "  OK Set BASH_ENV (all users)" -ForegroundColor Green
 } else {
     Write-Host "  OK BASH_ENV already configured" -ForegroundColor Gray
 }
@@ -212,36 +223,27 @@ if (Test-Path $bashrcPath) {
     Write-Host "  OK Created ~/.bashrc" -ForegroundColor Green
 }
 
-# 6. Cygwin ~/.bashrc
-# In Cygwin, $HOME is the Cygwin home (/home/<user>), NOT %USERPROFILE%.
-# We use cygpath to convert the Windows %USERPROFILE% path so the source line
-# resolves to the same ~/.bash_env that BASH_ENV points to.
-Write-Host "[6/6] Configuring Cygwin..." -ForegroundColor Green
-$cygwinBashrc = "$CygwinRoot\home\$env:USERNAME\.bashrc"
-$cygwinSourceLine = @"
-
-# Load Cygwin aliases — use cygpath so this resolves even though
-# `$HOME (Cygwin) != %USERPROFILE% (Windows).
-[ -f "`$(cygpath -u "`$USERPROFILE")/.bash_env" ] && source "`$(cygpath -u "`$USERPROFILE")/.bash_env"
+# 6. Cygwin /etc/profile.d/cygctl.sh (all users)
+# Files in /etc/profile.d/ are sourced by /etc/profile for every user on login.
+# This makes aliases available to all Cygwin users without touching individual home dirs.
+Write-Host "[6/6] Configuring Cygwin (all users)..." -ForegroundColor Green
+$profileDDir = "$CygwinRoot\etc\profile.d"
+$cygctlProfileD = "$profileDDir\cygctl.sh"
+$cygctlContent = @"
+# cygctl aliases — sourced for all Cygwin users via /etc/profile.d/
+cyg()    { cygctl.exe  "`$@"; }
+apt()    { apt-cyg.exe "`$@"; }
+alias cygctl='cygctl.exe'
+alias apt-cyg='apt-cyg.exe'
+alias sudo='sudo.exe'
+alias su='su.exe'
 "@
-$cygwinSourceLineLF = $cygwinSourceLine.Replace("`r`n", "`n")
 
-if (Test-Path (Split-Path $cygwinBashrc)) {
-    if (Test-Path $cygwinBashrc) {
-        $content = Get-Content $cygwinBashrc -Raw
-        if ($content -match "\.bash_env") {
-            Write-Host "  OK Cygwin ~/.bashrc already sources ~/.bash_env" -ForegroundColor Gray
-        } else {
-            $existing = [System.IO.File]::ReadAllText($cygwinBashrc)
-            [System.IO.File]::WriteAllText($cygwinBashrc, $existing + $cygwinSourceLineLF, $utf8NoBom)
-            Write-Host "  OK Patched Cygwin ~/.bashrc" -ForegroundColor Green
-        }
-    } else {
-        [System.IO.File]::WriteAllText($cygwinBashrc, $cygwinSourceLineLF.TrimStart(), $utf8NoBom)
-        Write-Host "  OK Created Cygwin ~/.bashrc" -ForegroundColor Green
-    }
+if (Test-Path $profileDDir) {
+    [System.IO.File]::WriteAllText($cygctlProfileD, $cygctlContent.Replace("`r`n", "`n").TrimStart(), $utf8NoBom)
+    Write-Host "  OK Written /etc/profile.d/cygctl.sh (all users)" -ForegroundColor Green
 } else {
-    Write-Host "  SKIP Cygwin home not found" -ForegroundColor Gray
+    Write-Host "  SKIP Cygwin /etc/profile.d not found" -ForegroundColor Gray
 }
 
 # Done
