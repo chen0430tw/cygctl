@@ -418,7 +418,12 @@ func spawnAsUser(username, domain, password, exe string, args []string) error {
 	domainPtr, _ := windows.UTF16PtrFromString(domain)
 	passPtr, _ := windows.UTF16PtrFromString(password)
 	exePtr, _ := windows.UTF16PtrFromString(exe)
-	cmdLine := makeCmdLine(args)
+	// lpCommandLine must include argv[0] (the exe path) as its first token.
+	// CreateProcessWithLogonW parses the entire command line to build argv[],
+	// so omitting argv[0] would shift all arguments left by one, causing the
+	// child to read argv[1] ("127.0.0.1:PORT") as argv[1] instead of
+	// "--client", and the --client mode check in main() would silently fail.
+	cmdLine := makeCmdLine(append([]string{exe}, args...))
 	cmdPtr, _ := windows.UTF16PtrFromString(cmdLine)
 
 	var si windows.StartupInfo
