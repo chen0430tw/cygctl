@@ -908,7 +908,7 @@ func cmdCheck(names []string) {
 					continue
 				}
 				total++
-				fullPath := filepath.Join(CygwinRoot, strings.TrimPrefix(f, "./"))
+				fullPath := "/" + strings.TrimPrefix(f, "./")
 				if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 					fmt.Fprintf(os.Stderr, "  MISSING: /%s\n", strings.TrimPrefix(f, "./"))
 					missing++
@@ -1271,7 +1271,7 @@ func rollbackInstall(name string) {
 		if strings.HasSuffix(f, "/") {
 			continue
 		}
-		os.Remove(filepath.Join(CygwinRoot, strings.TrimPrefix(f, "./")))
+		os.Remove("/" + strings.TrimPrefix(f, "./"))
 	}
 	os.Remove(lstFile)
 }
@@ -1307,7 +1307,7 @@ func cmdRemove(names []string) {
 			if strings.HasSuffix(f, "/") {
 				continue
 			}
-			fullPath := filepath.Join(CygwinRoot, strings.TrimPrefix(f, "./"))
+			fullPath := "/" + strings.TrimPrefix(f, "./")
 			os.Remove(fullPath)
 		}
 
@@ -1321,11 +1321,11 @@ func cmdRemove(names []string) {
 		}
 		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 		for _, d := range dirs {
-			os.Remove(filepath.Join(CygwinRoot, d)) // silently fails if not empty
+			os.Remove("/" + d) // silently fails if not empty
 		}
 
 		// Remove postinstall done marker
-		os.Remove(filepath.Join(CygwinRoot, "etc", "postinstall", name+".sh.done"))
+		os.Remove("/etc/postinstall/" + name + ".sh.done")
 
 		// Remove records
 		os.Remove(lstFile)
@@ -1690,7 +1690,7 @@ func checkPEBins(pkg string) (bad, total int) {
 		}
 		total++
 
-		fullPath := filepath.Join(CygwinRoot, strings.TrimPrefix(entry, "./"))
+		fullPath := "/" + strings.TrimPrefix(entry, "./")
 		f, err := os.Open(fullPath)
 		if err != nil {
 			continue // missing file caught by check 3
