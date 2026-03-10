@@ -124,23 +124,23 @@ if ($autoRun -and $autoRun.AutoRun -like '*cmd_macros*') {
     Write-Host "  OK No AutoRun configured" -ForegroundColor Gray
 }
 
-# 5. Remove shell aliases (~/.bash_env, BASH_ENV env var, source line in ~/.bashrc)
+# 5. Remove shell aliases (bash_env.sh, BASH_ENV env var, Git Bash system bashrc patch)
 Write-Host "[5/6] Cleaning shell aliases..." -ForegroundColor Green
 
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
-# Remove ~/.bash_env
-$bashEnvPath = "$env:USERPROFILE\.bash_env"
+# Remove shared bash_env.sh from ProgramData
+$bashEnvPath = "$env:ProgramData\cygctl\bash_env.sh"
 if (Test-Path $bashEnvPath) {
     Remove-Item $bashEnvPath -Force
-    Write-Host "  OK Removed ~/.bash_env" -ForegroundColor Green
+    Write-Host "  OK Removed bash_env.sh" -ForegroundColor Green
 } else {
-    Write-Host "  OK ~/.bash_env not found" -ForegroundColor Gray
+    Write-Host "  OK bash_env.sh not found" -ForegroundColor Gray
 }
 
-# Unset machine-wide BASH_ENV (only if we set it)
+# Unset machine-wide BASH_ENV (only if it points to our file)
 $currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "Machine")
-if ($currentBashEnv -eq '%USERPROFILE%\.bash_env') {
+if ($currentBashEnv -eq $bashEnvPath) {
     [Environment]::SetEnvironmentVariable("BASH_ENV", $null, "Machine")
     Write-Host "  OK Cleared BASH_ENV" -ForegroundColor Green
 } else {
@@ -156,25 +156,26 @@ if ($currentMsysPathType -eq 'inherit') {
     Write-Host "  OK MSYS2_PATH_TYPE not set by us" -ForegroundColor Gray
 }
 
-# Remove source line from ~/.bashrc
-$bashrcPath = "$env:USERPROFILE\.bashrc"
-if (Test-Path $bashrcPath) {
-    $content = Get-Content $bashrcPath -Raw
-    if ($content -match "\.bash_env") {
-        $newContent = $content -replace '(?s)(\r?\n)?# Load Cygwin aliases[^\n]*\r?\n\[ -f "[^"]*\.bash_env" \] && source "[^"]*\.bash_env"\r?\n?', ''
-        $newContent = $newContent -replace '^\r?\n', ''
-        if ($newContent.Trim() -eq '') {
-            Remove-Item $bashrcPath -Force
-            Write-Host "  OK Removed ~/.bashrc (was only aliases)" -ForegroundColor Green
+# Remove cygctl source line from Git Bash system etc\bash.bashrc
+$gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($gitCmd) {
+    $gitRoot = Split-Path (Split-Path $gitCmd.Source -Parent) -Parent
+    $gitBashrc = "$gitRoot\etc\bash.bashrc"
+    if (Test-Path $gitBashrc) {
+        $content = [System.IO.File]::ReadAllText($gitBashrc)
+        if ($content -match "cygctl") {
+            $newContent = $content -replace '(?s)(\r?\n)?# Load cygctl aliases[^\n]*\r?\n\[ -f "\$BASH_ENV" \] && source "\$BASH_ENV"\r?\n?', ''
+            $newContent = $newContent -replace '^\r?\n', ''
+            [System.IO.File]::WriteAllText($gitBashrc, $newContent, $utf8NoBom)
+            Write-Host "  OK Patched Git Bash etc\bash.bashrc" -ForegroundColor Green
         } else {
-            [System.IO.File]::WriteAllText($bashrcPath, $newContent, $utf8NoBom)
-            Write-Host "  OK Patched ~/.bashrc" -ForegroundColor Green
+            Write-Host "  OK Git Bash etc\bash.bashrc has no cygctl entries" -ForegroundColor Gray
         }
     } else {
-        Write-Host "  OK ~/.bashrc has no cygctl entries" -ForegroundColor Gray
+        Write-Host "  SKIP Git Bash etc\bash.bashrc not found" -ForegroundColor Gray
     }
 } else {
-    Write-Host "  OK ~/.bashrc not found" -ForegroundColor Gray
+    Write-Host "  SKIP git.exe not found" -ForegroundColor Gray
 }
 
 # 6. Remove Cygwin /etc/profile.d/cygctl.sh (all users)
@@ -240,36 +241,42 @@ if (Test-Path $macrosFile) {
     Write-Host "  [OK] CMD macros clean" -ForegroundColor Green
 }
 
-# Check ~/.bash_env removed
-$bashEnvPath = "$env:USERPROFILE\.bash_env"
+# Check bash_env.sh removed
+$bashEnvPath = "$env:ProgramData\cygctl\bash_env.sh"
 if (Test-Path $bashEnvPath) {
-    $issues += "~/.bash_env still exists"
-    Write-Host "  [FAIL] ~/.bash_env still exists" -ForegroundColor Red
+    $issues += "bash_env.sh still exists"
+    Write-Host "  [FAIL] bash_env.sh still exists" -ForegroundColor Red
 } else {
-    Write-Host "  [OK] ~/.bash_env removed" -ForegroundColor Green
+    Write-Host "  [OK] bash_env.sh removed" -ForegroundColor Green
 }
 
 # Check BASH_ENV cleared
 $currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "Machine")
-if ($currentBashEnv -eq '%USERPROFILE%\.bash_env') {
+if ($currentBashEnv -eq $bashEnvPath) {
     $issues += "BASH_ENV still set machine-wide"
     Write-Host "  [FAIL] BASH_ENV not cleared" -ForegroundColor Red
 } else {
     Write-Host "  [OK] BASH_ENV clear" -ForegroundColor Green
 }
 
-# Check Git Bash ~/.bashrc
-$bashrcPath = "$env:USERPROFILE\.bashrc"
-if (Test-Path $bashrcPath) {
-    $content = Get-Content $bashrcPath -Raw
-    if ($content -match "\.bash_env") {
-        $issues += "Git Bash .bashrc still references .bash_env"
-        Write-Host "  [FAIL] Git Bash .bashrc still references .bash_env" -ForegroundColor Red
+# Check Git Bash system bashrc
+$gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($gitCmd) {
+    $gitRoot = Split-Path (Split-Path $gitCmd.Source -Parent) -Parent
+    $gitBashrc = "$gitRoot\etc\bash.bashrc"
+    if (Test-Path $gitBashrc) {
+        $content = Get-Content $gitBashrc -Raw
+        if ($content -match "cygctl") {
+            $issues += "Git Bash etc\bash.bashrc still has cygctl entries"
+            Write-Host "  [FAIL] Git Bash etc\bash.bashrc still has cygctl entries" -ForegroundColor Red
+        } else {
+            Write-Host "  [OK] Git Bash etc\bash.bashrc clean" -ForegroundColor Green
+        }
     } else {
-        Write-Host "  [OK] Git Bash .bashrc clean" -ForegroundColor Green
+        Write-Host "  [OK] Git Bash etc\bash.bashrc clean (no file)" -ForegroundColor Green
     }
 } else {
-    Write-Host "  [OK] Git Bash .bashrc clean (no file)" -ForegroundColor Green
+    Write-Host "  [OK] Git Bash not found (skipped)" -ForegroundColor Gray
 }
 
 # Check Cygwin /etc/profile.d/cygctl.sh

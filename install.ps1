@@ -172,9 +172,9 @@ Write-Host "[5/6] Configuring shell aliases..." -ForegroundColor Green
 # UTF-8 without BOM — a BOM at the start of a shell file causes bash to crash.
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 
-# ~/.bash_env: no early-exit guard, so it is safe to source non-interactively.
-# When BASH_ENV points here, bash loads it automatically for every non-interactive shell.
-$bashEnvPath = "$env:USERPROFILE\.bash_env"
+# Write bash_env.sh to the shared ProgramData directory so all users get the
+# same file regardless of which Windows account runs the installer.
+$bashEnvPath = "$env:ProgramData\cygctl\bash_env.sh"
 $bashEnvContent = @"
 # Cygwin aliases
 # MSYS_NO_PATHCONV=1 prevents Git Bash from mangling Unix paths (e.g. / -> C:/Program Files/Git/)
@@ -187,13 +187,13 @@ alias sudo='sudo.exe'
 alias su='su.exe'
 "@
 [System.IO.File]::WriteAllText($bashEnvPath, $bashEnvContent.Replace("`r`n", "`n").TrimStart(), $utf8NoBom)
-Write-Host "  OK Written ~/.bash_env" -ForegroundColor Green
+Write-Host "  OK Written $bashEnvPath" -ForegroundColor Green
 
-# Set BASH_ENV machine-wide so every non-interactive bash auto-sources ~/.bash_env.
-# Using %USERPROFILE% (unexpanded) so Windows expands it per-user at process creation time.
+# Set BASH_ENV machine-wide to the fixed ProgramData path.
+# Non-interactive bash (agents, subprocesses, pipes) loads this automatically.
 $currentBashEnv = [Environment]::GetEnvironmentVariable("BASH_ENV", "Machine")
-if ($currentBashEnv -ne '%USERPROFILE%\.bash_env') {
-    [Environment]::SetEnvironmentVariable("BASH_ENV", '%USERPROFILE%\.bash_env', "Machine")
+if ($currentBashEnv -ne $bashEnvPath) {
+    [Environment]::SetEnvironmentVariable("BASH_ENV", $bashEnvPath, "Machine")
     Write-Host "  OK Set BASH_ENV (all users)" -ForegroundColor Green
 } else {
     Write-Host "  OK BASH_ENV already configured" -ForegroundColor Gray
@@ -211,28 +211,33 @@ if ($currentMsysPathType -ne 'inherit') {
     Write-Host "  OK MSYS2_PATH_TYPE already set to inherit" -ForegroundColor Gray
 }
 
-# Patch ~/.bashrc to source ~/.bash_env for interactive Git Bash sessions.
-# Must appear before any early-exit guard (case $- in *i*) ;; *) return ;; esac).
-$bashrcPath = "$env:USERPROFILE\.bashrc"
-$bashrcSourceLine = @"
+# Patch Git Bash system-wide etc\bash.bashrc so interactive Git Bash sessions
+# also load the aliases. The system bashrc applies to ALL users (unlike ~/.bashrc).
+# For interactive shells BASH_ENV is not loaded automatically, so we source it explicitly.
+$gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($gitCmd) {
+    $gitRoot = Split-Path (Split-Path $gitCmd.Source -Parent) -Parent
+    $gitBashrc = "$gitRoot\etc\bash.bashrc"
+    $gitSourceLine = @"
 
-# Load Cygwin aliases (non-interactive shells load this via BASH_ENV automatically)
-[ -f "`$HOME/.bash_env" ] && source "`$HOME/.bash_env"
+# Load cygctl aliases (non-interactive shells load this via BASH_ENV automatically)
+[ -f "`$BASH_ENV" ] && source "`$BASH_ENV"
 "@
-$bashrcSourceLineLF = $bashrcSourceLine.Replace("`r`n", "`n")
+    $gitSourceLineLF = $gitSourceLine.Replace("`r`n", "`n")
 
-if (Test-Path $bashrcPath) {
-    $content = Get-Content $bashrcPath -Raw
-    if ($content -match "\.bash_env") {
-        Write-Host "  OK ~/.bashrc already sources ~/.bash_env" -ForegroundColor Gray
+    if (Test-Path $gitBashrc) {
+        $content = [System.IO.File]::ReadAllText($gitBashrc)
+        if ($content -match "cygctl") {
+            Write-Host "  OK Git Bash etc\bash.bashrc already patched" -ForegroundColor Gray
+        } else {
+            [System.IO.File]::WriteAllText($gitBashrc, $content + $gitSourceLineLF, $utf8NoBom)
+            Write-Host "  OK Patched Git Bash etc\bash.bashrc (all users)" -ForegroundColor Green
+        }
     } else {
-        $existing = [System.IO.File]::ReadAllText($bashrcPath)
-        [System.IO.File]::WriteAllText($bashrcPath, $existing + $bashrcSourceLineLF, $utf8NoBom)
-        Write-Host "  OK Patched ~/.bashrc" -ForegroundColor Green
+        Write-Host "  SKIP Git Bash etc\bash.bashrc not found at $gitBashrc" -ForegroundColor Gray
     }
 } else {
-    [System.IO.File]::WriteAllText($bashrcPath, $bashrcSourceLineLF.TrimStart(), $utf8NoBom)
-    Write-Host "  OK Created ~/.bashrc" -ForegroundColor Green
+    Write-Host "  SKIP git.exe not found; skipping Git Bash bashrc patch" -ForegroundColor Gray
 }
 
 # 6. Cygwin /etc/profile.d/cygctl.sh (all users)
