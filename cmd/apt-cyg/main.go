@@ -908,7 +908,7 @@ func cmdCheck(names []string) {
 					continue
 				}
 				total++
-				fullPath := "/" + strings.TrimPrefix(f, "./")
+				fullPath := cygRelToWindowsPath(f)
 				if _, err := os.Stat(fullPath); os.IsNotExist(err) {
 					fmt.Fprintf(os.Stderr, "  MISSING: /%s\n", strings.TrimPrefix(f, "./"))
 					missing++
@@ -1271,7 +1271,7 @@ func rollbackInstall(name string) {
 		if strings.HasSuffix(f, "/") {
 			continue
 		}
-		os.Remove("/" + strings.TrimPrefix(f, "./"))
+		os.Remove(cygRelToWindowsPath(f))
 	}
 	os.Remove(lstFile)
 }
@@ -1307,7 +1307,7 @@ func cmdRemove(names []string) {
 			if strings.HasSuffix(f, "/") {
 				continue
 			}
-			fullPath := "/" + strings.TrimPrefix(f, "./")
+			fullPath := cygRelToWindowsPath(f)
 			os.Remove(fullPath)
 		}
 
@@ -1321,11 +1321,11 @@ func cmdRemove(names []string) {
 		}
 		sort.Sort(sort.Reverse(sort.StringSlice(dirs)))
 		for _, d := range dirs {
-			os.Remove("/" + d) // silently fails if not empty
+			os.Remove(filepath.Join(CygwinRoot, filepath.FromSlash(d))) // ignore error if not empty
 		}
 
 		// Remove postinstall done marker
-		os.Remove("/etc/postinstall/" + name + ".sh.done")
+		os.Remove(filepath.Join(CygwinRoot, "etc", "postinstall", name+".sh.done"))
 
 		// Remove records
 		os.Remove(lstFile)
@@ -1690,7 +1690,7 @@ func checkPEBins(pkg string) (bad, total int) {
 		}
 		total++
 
-		fullPath := "/" + strings.TrimPrefix(entry, "./")
+		fullPath := cygRelToWindowsPath(entry)
 		f, err := os.Open(fullPath)
 		if err != nil {
 			continue // missing file caught by check 3
@@ -1980,6 +1980,15 @@ func toCygwinPath(winPath string) string {
 		return "/cygdrive/" + drive + rest
 	}
 	return strings.ReplaceAll(winPath, `\`, "/")
+}
+
+// cygRelToWindowsPath converts a package manifest entry like "./usr/bin/sl.exe"
+// or "usr/bin/sl.exe" to the corresponding native Windows path under CygwinRoot.
+// This is needed because Go is compiled as a native Windows binary and os.* functions
+// use Win32 API which does not understand POSIX paths like "/usr/bin/sl.exe".
+func cygRelToWindowsPath(f string) string {
+	rel := strings.TrimPrefix(f, "./")
+	return filepath.Join(CygwinRoot, filepath.FromSlash(rel))
 }
 
 func toWindowsPath(cygPath string) (string, error) {
