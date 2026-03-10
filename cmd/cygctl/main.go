@@ -34,7 +34,7 @@ func init() {
 	CygwinRoot = findCygwinRoot()
 	CygwinBin = CygwinRoot + `\bin`
 	BashExe = CygwinBin + `\bash.exe`
-	AptCyg = CygwinBin + `\apt.exe`
+	AptCyg = CygwinBin + `\apt-cyg.exe`
 	SudoCmd = CygwinBin + `\sudo.exe`
 	SuCmd = CygwinBin + `\su.exe`
 }
