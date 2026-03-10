@@ -143,6 +143,9 @@ cyg --user alice --cd "D:\Projects"
 
 > **注意：** `su` 使用 `CreateProcessWithLogonW`，需要 Windows 的 Secondary Logon 服务（`seclogon`）处于运行状态。该服务在所有现代 Windows 版本上默认启用。
 
+> [!WARNING]
+> **空密码账户无法通过 `su` 登录。** Windows 安全策略（`LimitBlankPasswordUse`）限制空密码账户只能通过本地交互式登录（控制台）访问，`CreateProcessWithLogonW` 所使用的网络/服务登录方式会被拒绝。使用 `su` 前，请确保目标账户已设置密码。
+
 ### WSL 集成（cyg wsl）
 
 `cyg wsl` 让你在 Cygwin 内管理和操作 WSL。
