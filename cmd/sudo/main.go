@@ -251,7 +251,21 @@ func runClient(args []string) int {
 		return 1
 	}
 
+	// Enable all privileges in our elevated token so that Windows-level access
+	// checks (raw sockets, SeDebugPrivilege, SeSecurityPrivilege, …) succeed
+	// for any program — not just nmap.  UAC elevation gives us the full admin
+	// privilege set but leaves most entries disabled; this enables them all.
+	enableAllPrivileges()
+
 	// Step 3: Run command with the received environment
+	// Convert Cygwin/Git-Bash paths to Windows paths so Windows can find the executable.
+	if len(cmdArgs) > 0 {
+		cmdArgs[0] = convertCygwinPath(cmdArgs[0])
+	}
+	// Set NMAP_PRIVILEGED/NPING_PRIVILEGED so Cygwin-compiled nmap/nping treat
+	// this elevated process as privileged (geteuid() doesn't return 0 on Windows
+	// even when the process has admin rights).
+	environ = append(environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = environ
 
@@ -333,6 +347,95 @@ func getOEMCP() uint32 {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	r, _, _ := kernel32.NewProc("GetOEMCP").Call()
 	return uint32(r)
+}
+
+// enableAllPrivileges enables every privilege that is present (but possibly
+// disabled) in the current process token.  UAC elevation populates the token
+// with the full administrator privilege set but starts most of them disabled.
+// Enabling them all means any subsequent Windows-level privilege check
+// (raw sockets, SeDebugPrivilege, SeSecurityPrivilege, SeBackupPrivilege, …)
+// will succeed for whatever program sudo runs — no per-program workarounds needed.
+func enableAllPrivileges() {
+	advapi32 := syscall.NewLazyDLL("advapi32.dll")
+	openProcessToken    := advapi32.NewProc("OpenProcessToken")
+	getTokenInformation := advapi32.NewProc("GetTokenInformation")
+	adjustTokenPrivs    := advapi32.NewProc("AdjustTokenPrivileges")
+
+	proc, err := syscall.GetCurrentProcess()
+	if err != nil {
+		return
+	}
+	var tok syscall.Handle
+	r, _, _ := openProcessToken.Call(
+		uintptr(proc),
+		uintptr(syscall.TOKEN_ADJUST_PRIVILEGES|syscall.TOKEN_QUERY),
+		uintptr(unsafe.Pointer(&tok)),
+	)
+	if r == 0 {
+		return
+	}
+	defer syscall.CloseHandle(tok)
+
+	// First call: find out how large the TOKEN_PRIVILEGES buffer needs to be.
+	const tokenPrivilegesClass = 3
+	var needed uint32
+	getTokenInformation.Call(uintptr(tok), tokenPrivilegesClass, 0, 0, uintptr(unsafe.Pointer(&needed)))
+	if needed == 0 {
+		return
+	}
+
+	buf := make([]byte, needed)
+	r, _, _ = getTokenInformation.Call(
+		uintptr(tok), tokenPrivilegesClass,
+		uintptr(unsafe.Pointer(&buf[0])), uintptr(needed),
+		uintptr(unsafe.Pointer(&needed)),
+	)
+	if r == 0 {
+		return
+	}
+
+	// TOKEN_PRIVILEGES layout:
+	//   uint32 PrivilegeCount                     — offset 0, 4 bytes
+	//   LUID_AND_ATTRIBUTES Privileges[count]     — offset 4, each 12 bytes
+	//     LUID (uint32 LowPart + int32 HighPart)  — 8 bytes
+	//     uint32 Attributes                       — 4 bytes  ← set SE_PRIVILEGE_ENABLED here
+	const (
+		sePrivilegeEnabled  = 0x00000002
+		luidAndAttrsSize    = 12 // 8-byte LUID + 4-byte Attributes
+	)
+	count := *(*uint32)(unsafe.Pointer(&buf[0]))
+	for i := uint32(0); i < count; i++ {
+		attrsOff := 4 + uintptr(i)*luidAndAttrsSize + 8
+		*(*uint32)(unsafe.Pointer(&buf[attrsOff])) |= sePrivilegeEnabled
+	}
+
+	// Passing the modified buffer re-enables everything in one call.
+	// Errors are intentionally ignored: partial success is still an improvement.
+	adjustTokenPrivs.Call(uintptr(tok), 0, uintptr(unsafe.Pointer(&buf[0])), 0, 0, 0)
+}
+
+// convertCygwinPath converts Cygwin-style paths to Windows paths.
+// /cygdrive/c/path -> C:\path
+// /c/path -> C:\path (Git Bash style)
+// Relative paths and already-Windows paths are returned unchanged.
+func convertCygwinPath(p string) string {
+	// /cygdrive/X/... format
+	if strings.HasPrefix(p, "/cygdrive/") && len(p) >= 11 {
+		drive := p[10]
+		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
+			rest := p[11:]
+			return string(drive) + ":" + strings.ReplaceAll(rest, "/", `\`)
+		}
+	}
+	// /X/... format (Git Bash / MSYS2 short mount, e.g. /c/Users/...)
+	if len(p) >= 3 && p[0] == '/' && p[2] == '/' {
+		drive := p[1]
+		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
+			rest := p[2:]
+			return string(drive) + ":" + strings.ReplaceAll(rest, "/", `\`)
+		}
+	}
+	return p
 }
 
 // containsGBKExclusiveBytes reports whether p contains any byte pair whose
