@@ -235,7 +235,22 @@ cyg --help      # Show help
 
 ## Usage in AI Agents and Scripts
 
-`cyg` and `apt` work in **non-interactive shells** — `bash -c`, subprocesses, pipes, and AI agent tool environments (Claude Code, Cursor, etc.) — without any extra flags.
+`cyg` and `apt` work in **non-interactive shells** — `bash -c`, subprocesses, pipes, and AI agent tool environments (Claude Code, Cursor, OpenClaw, etc.) — without any extra flags.
+
+### OpenClaw on Windows without WSL
+
+[OpenClaw](https://openclaw.ai) is an open-source autonomous AI agent that runs shell commands via bash. Its official Windows support requires WSL2. If you're on a machine where WSL2 is unavailable (Hyper-V disabled by policy, no virtualisation, etc.), cygctl provides a drop-in alternative:
+
+1. Install Cygwin and cygctl as normal.
+2. Point OpenClaw's shell to Git Bash (which inherits `BASH_ENV` and therefore has `cyg`/`apt` available).
+3. OpenClaw's `system.run` calls land in a bash process that already has Cygwin tools in scope — no WSL needed.
+
+```bash
+# These work inside OpenClaw's shell tool on Windows + Cygwin
+cyg ls -la /cygdrive/c/Users
+apt install git curl wget
+cyg python3 my_script.py
+```
 
 ```bash
 # All of these work after installation, even without -i
