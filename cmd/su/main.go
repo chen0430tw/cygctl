@@ -44,17 +44,14 @@ type msgWriter struct {
 func (w *msgWriter) Write(p []byte) (n int, err error) {
 	data := p
 	// Transcode only when the system uses a non-UTF-8 OEM codepage (e.g. 936 for GBK)
-	// and the bytes are not already valid UTF-8. This handles Windows native commands
-	// (icacls, net, dir, ...) that write in the OEM codepage when piped, while leaving
-	// UTF-8 output untouched.
+	// and the bytes are not already valid UTF-8, or contain GBK-exclusive byte pairs.
+	// This handles Windows native commands (icacls, net, dir, ...) that write in the
+	// OEM codepage when piped, while leaving genuine UTF-8 output untouched.
 	//
-	// Limitation: ~8% of GBK code points (high byte 0xC2–0xDF, low byte 0x80–0xBF)
-	// are byte-for-byte identical to valid 2-byte UTF-8 sequences. A chunk consisting
-	// entirely of such characters (e.g. some uses of 权/限) will pass utf8.Valid and
-	// will NOT be transcoded. In practice most Windows command output mixes these with
-	// other GBK bytes (high byte ≤ 0xC1) that are unambiguously invalid UTF-8, so
-	// those chunks are caught and the whole line is transcoded correctly.
-	if w.fromCP != 0 && w.fromCP != 65001 && !utf8.Valid(p) {
+	// GBK lead bytes 0x81–0x9F are definitively invalid as UTF-8 lead bytes. Their
+	// presence (∩ ≠ ∅ with the GBK-exclusive range) is a hard signal for GBK even
+	// when the surrounding bytes might otherwise pass utf8.Valid.
+	if w.fromCP != 0 && w.fromCP != 65001 && (!utf8.Valid(p) || containsGBKExclusiveBytes(p)) {
 		data = oemToUTF8(p, w.fromCP)
 	}
 	if err := w.enc.Encode(&msg{Name: w.name, Data: data}); err != nil {
@@ -69,6 +66,21 @@ func getOEMCP() uint32 {
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	r, _, _ := kernel32.NewProc("GetOEMCP").Call()
 	return uint32(r)
+}
+
+// containsGBKExclusiveBytes reports whether p contains any byte pair whose
+// lead byte is in the GBK-exclusive range 0x81–0x9F (definitively invalid as
+// a UTF-8 lead byte) followed by a valid GBK trail byte (0x40–0x7E or 0x80–0xFE).
+func containsGBKExclusiveBytes(p []byte) bool {
+	for i := 0; i < len(p)-1; i++ {
+		if p[i] >= 0x81 && p[i] <= 0x9F {
+			t := p[i+1]
+			if (t >= 0x40 && t <= 0x7E) || (t >= 0x80 && t <= 0xFE) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // oemToUTF8 converts bytes from the given Windows OEM code page to UTF-8.
