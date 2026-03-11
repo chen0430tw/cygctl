@@ -338,14 +338,35 @@ func getOEMCP() uint32 {
 // containsGBKExclusiveBytes reports whether p contains any byte pair whose
 // lead byte is in the GBK-exclusive range 0x81–0x9F (definitively invalid as
 // a UTF-8 lead byte) followed by a valid GBK trail byte (0x40–0x7E or 0x80–0xFE).
+//
+// Valid UTF-8 multi-byte sequences are skipped so that 0x81–0x9F bytes
+// appearing as UTF-8 continuation bytes do not cause false positives.
 func containsGBKExclusiveBytes(p []byte) bool {
-	for i := 0; i < len(p)-1; i++ {
-		if p[i] >= 0x81 && p[i] <= 0x9F {
+	i := 0
+	for i < len(p) {
+		b := p[i]
+		// Skip over valid UTF-8 multi-byte sequences so their continuation
+		// bytes (which may fall in 0x81–0x9F) are not mistaken for GBK lead bytes.
+		if b >= 0xC2 && b <= 0xF4 && i+1 < len(p) && p[i+1]&0xC0 == 0x80 {
+			switch {
+			case b < 0xE0:
+				i += 2
+			case b < 0xF0:
+				i += 3
+			default:
+				i += 4
+			}
+			continue
+		}
+		// A byte in 0x81–0x9F that is not inside a valid UTF-8 sequence is a
+		// GBK-exclusive lead byte. Confirm with a valid GBK trail byte.
+		if b >= 0x81 && b <= 0x9F && i+1 < len(p) {
 			t := p[i+1]
 			if (t >= 0x40 && t <= 0x7E) || (t >= 0x80 && t <= 0xFE) {
 				return true
 			}
 		}
+		i++
 	}
 	return false
 }
