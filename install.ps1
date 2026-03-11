@@ -28,6 +28,18 @@ if (-not $currentPrincipal.IsInRole([Security.Principal.WindowsBuiltInRole]::Adm
 Write-Host "=== Cygctl Installer ===" -ForegroundColor Cyan
 Write-Host ""
 
+# Detect Windows 11 24H2+ native sudo
+# System32\sudo.exe is only created when the feature is enabled in Settings.
+$NativeSudoPath = Join-Path $env:SystemRoot "System32\sudo.exe"
+$NativeSudoActive = Test-Path $NativeSudoPath
+if ($NativeSudoActive) {
+    Write-Host "NOTICE: Windows 11 native sudo detected ($NativeSudoPath)." -ForegroundColor Yellow
+    Write-Host "  The 'alias sudo=sudo.exe' lines will be skipped in shell configs" -ForegroundColor Yellow
+    Write-Host "  to avoid overriding the built-in Windows sudo." -ForegroundColor Yellow
+    Write-Host "  cygctl's sudo.exe is still installed and callable as 'sudo.exe'." -ForegroundColor Yellow
+    Write-Host ""
+}
+
 # Auto-detect Cygwin installation root
 # Cygwin's setup.exe writes the install path to the registry; try that first.
 if (-not $CygwinRoot) {
@@ -204,9 +216,12 @@ cyg()    { MSYS_NO_PATHCONV=1 cygctl.exe  "`$@"; }
 apt()    { MSYS_NO_PATHCONV=1 apt-cyg.exe "`$@"; }
 alias cygctl='cygctl.exe'
 alias apt-cyg='apt-cyg.exe'
-alias sudo='sudo.exe'
 alias su='su.exe'
 "@
+# Only alias sudo when Windows native sudo is not active, to avoid shadowing it.
+if (-not $NativeSudoActive) {
+    $bashEnvContent += "alias sudo='sudo.exe'`n"
+}
 [System.IO.File]::WriteAllText($bashEnvPath, $bashEnvContent.Replace("`r`n", "`n").TrimStart(), $utf8NoBom)
 Write-Host "  OK Written $bashEnvPath" -ForegroundColor Green
 
@@ -273,9 +288,13 @@ cyg()    { cygctl.exe  "`$@"; }
 apt()    { apt-cyg.exe "`$@"; }
 alias cygctl='cygctl.exe'
 alias apt-cyg='apt-cyg.exe'
-alias sudo='sudo.exe'
 alias su='su.exe'
 "@
+# Only alias sudo when Windows native sudo is not active.
+# In Cygwin, sudo.exe in /bin is found via PATH without an alias.
+if (-not $NativeSudoActive) {
+    $cygctlContent += "alias sudo='sudo.exe'`n"
+}
 
 if (Test-Path $profileDDir) {
     [System.IO.File]::WriteAllText($cygctlProfileD, $cygctlContent.Replace("`r`n", "`n").TrimStart(), $utf8NoBom)
@@ -291,7 +310,11 @@ Write-Host ""
 Write-Host "Installed commands:" -ForegroundColor Cyan
 Write-Host "  cygctl  - Cygwin CLI tool"
 Write-Host "  apt-cyg - Package manager"
-Write-Host "  sudo    - UAC elevation"
+if ($NativeSudoActive) {
+    Write-Host "  sudo.exe - UAC elevation (call as 'sudo.exe'; 'sudo' uses Windows built-in)" -ForegroundColor Yellow
+} else {
+    Write-Host "  sudo    - UAC elevation"
+}
 Write-Host "  su      - Switch Windows user (requires Secondary Logon service)"
 Write-Host ""
 Write-Host "Aliases:" -ForegroundColor Cyan
