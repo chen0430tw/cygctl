@@ -318,7 +318,7 @@ func (w *msgWriter) Write(p []byte) (n int, err error) {
 	// GBK lead bytes 0x81–0x9F are definitively invalid as UTF-8 lead bytes. Their
 	// presence (∩ ≠ ∅ with the GBK-exclusive range) is a hard signal for GBK even
 	// when the surrounding bytes might otherwise pass utf8.Valid.
-	if w.fromCP != 0 && w.fromCP != 65001 && (!utf8.Valid(p) || containsGBKExclusiveBytes(p)) {
+	if w.fromCP != 0 && w.fromCP != 65001 && (!utf8.Valid(p) || containsGBKExclusiveBytes(p) || containsGBKBlindZoneBytes(p)) {
 		data = oemToUTF8(p, w.fromCP)
 	}
 	if err := w.enc.Encode(&msg{Name: w.name, Data: data}); err != nil {
@@ -369,6 +369,50 @@ func containsGBKExclusiveBytes(p []byte) bool {
 		i++
 	}
 	return false
+}
+
+// containsGBKBlindZoneBytes reports whether p looks like GBK bytes that
+// accidentally pass utf8.Valid. GBK pairs whose lead byte is in 0xC2–0xDF
+// and trail byte is in 0xA1–0xBF are valid 2-byte UTF-8 sequences, forming
+// a blind zone that containsGBKExclusiveBytes cannot reach.
+//
+// The detection uses ASCII bytes (spaces, newlines, colons, …) as phase-anchor
+// points: after each ASCII anchor we know we are at a character boundary, so
+// the length of the next multibyte sequence is meaningful. Real CJK Unicode
+// characters (U+4E00–U+9FFF) encode to 3-byte UTF-8 sequences (lead 0xE4–0xEF),
+// while GBK blind-zone pairs are always 2-byte. A buffer with suspicious
+// 2-byte sequences after anchors and no confirming 3-byte CJK sequences is
+// treated as GBK.
+func containsGBKBlindZoneBytes(p []byte) bool {
+	suspicious2 := 0 // 2-byte pairs in blind zone (0xC2–0xDF lead, 0xA1–0xBF trail)
+	confirmed3 := 0  // 3-byte CJK sequences (0xE4–0xEF lead) — proof of real UTF-8
+	afterAnchor := true
+
+	for i := 0; i < len(p); {
+		b := p[i]
+		if b < 0x80 {
+			afterAnchor = true
+			i++
+			continue
+		}
+		if afterAnchor {
+			afterAnchor = false
+			if b >= 0xE4 && b <= 0xEF && i+2 < len(p) &&
+				p[i+1]&0xC0 == 0x80 && p[i+2]&0xC0 == 0x80 {
+				confirmed3++
+				i += 3
+				continue
+			}
+			if b >= 0xC2 && b <= 0xDF && i+1 < len(p) &&
+				p[i+1] >= 0xA1 && p[i+1] <= 0xBF {
+				suspicious2++
+				i += 2
+				continue
+			}
+		}
+		i++
+	}
+	return suspicious2 > 0 && confirmed3 == 0
 }
 
 // oemToUTF8 converts bytes from the given Windows OEM code page to UTF-8.
