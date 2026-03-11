@@ -252,6 +252,14 @@ func runClient(args []string) int {
 	}
 
 	// Step 3: Run command with the received environment
+	// Convert Cygwin/Git-Bash paths to Windows paths so Windows can find the executable.
+	if len(cmdArgs) > 0 {
+		cmdArgs[0] = convertCygwinPath(cmdArgs[0])
+	}
+	// Set NMAP_PRIVILEGED/NPING_PRIVILEGED so Cygwin-compiled nmap/nping treat
+	// this elevated process as privileged (geteuid() doesn't return 0 on Windows
+	// even when the process has admin rights).
+	environ = append(environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = environ
 
@@ -333,6 +341,30 @@ func getOEMCP() uint32 {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	r, _, _ := kernel32.NewProc("GetOEMCP").Call()
 	return uint32(r)
+}
+
+// convertCygwinPath converts Cygwin-style paths to Windows paths.
+// /cygdrive/c/path -> C:\path
+// /c/path -> C:\path (Git Bash style)
+// Relative paths and already-Windows paths are returned unchanged.
+func convertCygwinPath(p string) string {
+	// /cygdrive/X/... format
+	if strings.HasPrefix(p, "/cygdrive/") && len(p) >= 11 {
+		drive := p[10]
+		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
+			rest := p[11:]
+			return string(drive) + ":" + strings.ReplaceAll(rest, "/", `\`)
+		}
+	}
+	// /X/... format (Git Bash / MSYS2 short mount, e.g. /c/Users/...)
+	if len(p) >= 3 && p[0] == '/' && p[2] == '/' {
+		drive := p[1]
+		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
+			rest := p[2:]
+			return string(drive) + ":" + strings.ReplaceAll(rest, "/", `\`)
+		}
+	}
+	return p
 }
 
 // containsGBKExclusiveBytes reports whether p contains any byte pair whose
