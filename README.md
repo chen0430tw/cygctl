@@ -154,6 +154,25 @@ sudo netstat -an
 sudo notepad C:\Windows\System32\drivers\etc\hosts
 ```
 
+> [!NOTE]
+> **Programs that check `geteuid() == 0` (nmap, tcpdump, …)**
+>
+> `sudo` triggers UAC elevation and enables all Windows admin privileges, so Windows-level access checks (raw sockets, `SeDebugPrivilege`, etc.) pass for any program.  However, Cygwin's `geteuid()` maps UIDs from the Windows SID, not from the Windows token privileges — even an elevated process keeps its regular user UID.  Programs that gate on `geteuid() == 0` will still see a non-root UID.
+>
+> `sudo` works around this automatically for nmap/nping via the `NMAP_PRIVILEGED=1` / `NPING_PRIVILEGED=1` environment variables.  For other programs that strictly require UID 0, map your admin account to UID 0 in Cygwin's `/etc/passwd`:
+>
+> ```bash
+> # Find your Windows username
+> whoami   # e.g. DESKTOP-ABC\alice
+>
+> # Open /etc/passwd and change the uid:gid fields for your account
+> # from e.g.  alice:unused:1049956:545:...
+> #         to  alice:unused:0:0:...
+> nano /etc/passwd
+> ```
+>
+> After saving, open a new Cygwin session — `id` should show `uid=0(root)`.  This only affects how Cygwin reports the UID; Windows permissions are unchanged.
+
 ### Su (Switch User)
 
 ```bash

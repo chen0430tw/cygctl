@@ -158,6 +158,25 @@ sudo netstat -an
 sudo notepad C:\Windows\System32\drivers\etc\hosts
 ```
 
+> [!NOTE]
+> **程序检查 `geteuid() == 0` 的情况（nmap、tcpdump 等）**
+>
+> `sudo` 会触发 UAC 提权并启用所有 Windows 管理员权限，因此 Windows 级别的访问检查（raw socket、`SeDebugPrivilege` 等）对任何程序均有效。但 Cygwin 的 `geteuid()` 是基于 Windows SID 映射 UID 的，与 token 特权无关——即使进程已提权，仍会保持普通用户的 UID。严格检查 `geteuid() == 0` 的程序将看到非 root 的 UID。
+>
+> `sudo` 已通过设置 `NMAP_PRIVILEGED=1` / `NPING_PRIVILEGED=1` 环境变量为 nmap/nping 自动绕过此限制。对于其他严格要求 UID 为 0 的程序，可在 Cygwin 的 `/etc/passwd` 中将管理员账户映射到 UID 0：
+>
+> ```bash
+> # 确认你的 Windows 用户名
+> whoami   # 例如 DESKTOP-ABC\alice
+>
+> # 编辑 /etc/passwd，将你账户的 uid:gid 字段改为 0:0
+> # 原来可能是：alice:unused:1049956:545:...
+> # 改成：      alice:unused:0:0:...
+> nano /etc/passwd
+> ```
+>
+> 保存后重新打开一个 Cygwin 会话，执行 `id` 应显示 `uid=0(root)`。此修改只影响 Cygwin 内 UID 的报告方式，不会改变 Windows 层面的权限。
+
 ### Su（切换用户）
 
 ```bash
