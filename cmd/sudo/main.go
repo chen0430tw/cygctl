@@ -12,10 +12,11 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 	"unsafe"
-	"strings"
 )
 
 const (
@@ -260,8 +261,9 @@ func runClient(args []string) int {
 		return 1
 	}
 
-	cmd.Stdout = &msgWriter{enc: enc, name: "stdout"}
-	cmd.Stderr = &msgWriter{enc: enc, name: "stderr"}
+	cp := getOEMCP()
+	cmd.Stdout = &msgWriter{enc: enc, name: "stdout", fromCP: cp}
+	cmd.Stderr = &msgWriter{enc: enc, name: "stderr", fromCP: cp}
 
 	// Forward stdin / signals from server
 	go func() {
@@ -301,15 +303,117 @@ func runClient(args []string) int {
 }
 
 type msgWriter struct {
-	enc  *gob.Encoder
-	name string
+	enc    *gob.Encoder
+	name   string
+	fromCP uint32 // OEM codepage for GBK→UTF-8 transcoding; 0 or 65001 = no-op
 }
 
 func (w *msgWriter) Write(p []byte) (n int, err error) {
-	if err := w.enc.Encode(&msg{Name: w.name, Data: p}); err != nil {
+	data := p
+	// Transcode only when the system uses a non-UTF-8 OEM codepage (e.g. 936 for GBK)
+	// and the bytes are not already valid UTF-8, or contain GBK-exclusive byte pairs.
+	// This handles Windows native commands (icacls, net, dir, ...) that write in the
+	// OEM codepage when piped, while leaving genuine UTF-8 output untouched.
+	//
+	// GBK lead bytes 0x81–0x9F are definitively invalid as UTF-8 lead bytes. Their
+	// presence (∩ ≠ ∅ with the GBK-exclusive range) is a hard signal for GBK even
+	// when the surrounding bytes might otherwise pass utf8.Valid.
+	if w.fromCP != 0 && w.fromCP != 65001 && (!utf8.Valid(p) || containsGBKExclusiveBytes(p)) {
+		data = oemToUTF8(p, w.fromCP)
+	}
+	if err := w.enc.Encode(&msg{Name: w.name, Data: data}); err != nil {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// getOEMCP returns the system OEM code page (e.g. 936 for Simplified Chinese).
+// This does not require a console to be attached.
+func getOEMCP() uint32 {
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	r, _, _ := kernel32.NewProc("GetOEMCP").Call()
+	return uint32(r)
+}
+
+// containsGBKExclusiveBytes reports whether p contains any byte pair whose
+// lead byte is in the GBK-exclusive range 0x81–0x9F (definitively invalid as
+// a UTF-8 lead byte) followed by a valid GBK trail byte (0x40–0x7E or 0x80–0xFE).
+//
+// Valid UTF-8 multi-byte sequences are skipped so that 0x81–0x9F bytes
+// appearing as UTF-8 continuation bytes do not cause false positives.
+func containsGBKExclusiveBytes(p []byte) bool {
+	i := 0
+	for i < len(p) {
+		b := p[i]
+		// Skip over valid UTF-8 multi-byte sequences so their continuation
+		// bytes (which may fall in 0x81–0x9F) are not mistaken for GBK lead bytes.
+		if b >= 0xC2 && b <= 0xF4 && i+1 < len(p) && p[i+1]&0xC0 == 0x80 {
+			switch {
+			case b < 0xE0:
+				i += 2
+			case b < 0xF0:
+				i += 3
+			default:
+				i += 4
+			}
+			continue
+		}
+		// A byte in 0x81–0x9F that is not inside a valid UTF-8 sequence is a
+		// GBK-exclusive lead byte. Confirm with a valid GBK trail byte.
+		if b >= 0x81 && b <= 0x9F && i+1 < len(p) {
+			t := p[i+1]
+			if (t >= 0x40 && t <= 0x7E) || (t >= 0x80 && t <= 0xFE) {
+				return true
+			}
+		}
+		i++
+	}
+	return false
+}
+
+// oemToUTF8 converts bytes from the given Windows OEM code page to UTF-8.
+// On failure it returns the original slice unchanged.
+func oemToUTF8(data []byte, fromCP uint32) []byte {
+	if len(data) == 0 {
+		return data
+	}
+	kernel32 := syscall.NewLazyDLL("kernel32.dll")
+	mbtwc := kernel32.NewProc("MultiByteToWideChar")
+	wctmb := kernel32.NewProc("WideCharToMultiByte")
+
+	// Pass 1: how many UTF-16 code units do we need?
+	nWide, _, _ := mbtwc.Call(
+		uintptr(fromCP), 0,
+		uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
+		0, 0,
+	)
+	if nWide == 0 {
+		return data
+	}
+	wbuf := make([]uint16, nWide)
+	mbtwc.Call(
+		uintptr(fromCP), 0,
+		uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
+		uintptr(unsafe.Pointer(&wbuf[0])), nWide,
+	)
+
+	// Pass 2: how many UTF-8 bytes do we need?
+	nBytes, _, _ := wctmb.Call(
+		65001, 0, // CP_UTF8
+		uintptr(unsafe.Pointer(&wbuf[0])), nWide,
+		0, 0, 0, 0,
+	)
+	if nBytes == 0 {
+		return data
+	}
+	result := make([]byte, nBytes)
+	wctmb.Call(
+		65001, 0,
+		uintptr(unsafe.Pointer(&wbuf[0])), nWide,
+		uintptr(unsafe.Pointer(&result[0])), nBytes,
+		0, 0,
+	)
+	return result
 }
 
 func shellExecuteAndWait(exe string, args []string) error {
@@ -328,7 +432,7 @@ func shellExecuteAndWait(exe string, args []string) error {
 		lpVerb:       uintptr(unsafe.Pointer(verbPtr)),
 		lpFile:       uintptr(unsafe.Pointer(filePtr)),
 		lpParameters: uintptr(unsafe.Pointer(paramsPtr)),
-		nShow:        SW_SHOW,
+		nShow:        SW_HIDE,
 	}
 
 	ret, _, _ := proc.Call(uintptr(unsafe.Pointer(&sei)))

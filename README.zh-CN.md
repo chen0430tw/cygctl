@@ -239,7 +239,20 @@ cyg --help      # 显示帮助
 
 ## 在 AI Agent 和脚本中使用
 
-安装完成后，`cyg` 和 `apt` 在**非交互式 Shell** 中也能直接使用 —— 包括 `bash -c`、子进程、管道，以及各类 AI Agent 工具环境（Claude Code、Cursor 等）。
+安装完成后，`cyg` 和 `apt` 在**非交互式 Shell** 中也能直接使用 —— 包括 `bash -c`、子进程、管道，以及各类 AI Agent 工具环境（Claude Code、Cursor、OpenClaw 等）。
+
+### 在没有 WSL 的 Windows 上运行 OpenClaw
+
+[OpenClaw](https://openclaw.ai) 是一个开源自主 AI agent，在宿主机上执行 shell 命令。官方 Windows 文档推荐使用 WSL2。如果 WSL2 不可用（Hyper-V 被策略禁用、没有虚拟化支持等），cygctl 可以作为可用的替代方案。
+
+**OpenClaw 在 Windows 上的 shell 选择逻辑：** 优先使用 PowerShell 7（`pwsh`），不可用时回退到 PowerShell 5.1。cygctl 安装器会直接将 `cyg` 和 `apt` 函数写入 PowerShell profile，因此 OpenClaw 启动的每一个 PowerShell 会话都能直接使用这些命令 —— 无需额外配置。
+
+```powershell
+# 在 Windows + Cygwin 环境下，这些命令在 OpenClaw 的 exec 工具中均可直接使用
+cyg ls -la /cygdrive/c/Users
+apt install git curl wget
+cyg python3 my_script.py
+```
 
 ```bash
 # 以下用法安装后均可直接使用，无需 -i 参数
