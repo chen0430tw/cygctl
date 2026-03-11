@@ -243,14 +243,12 @@ cyg --help      # 显示帮助
 
 ### 在没有 WSL 的 Windows 上运行 OpenClaw
 
-[OpenClaw](https://openclaw.ai) 是一个开源自主 AI agent，通过 bash 执行 shell 命令。官方 Windows 支持要求 WSL2。如果你的机器无法使用 WSL2（Hyper-V 被策略禁用、没有虚拟化支持等），cygctl 可以作为替代方案：
+[OpenClaw](https://openclaw.ai) 是一个开源自主 AI agent，在宿主机上执行 shell 命令。官方 Windows 文档推荐使用 WSL2。如果 WSL2 不可用（Hyper-V 被策略禁用、没有虚拟化支持等），cygctl 可以作为可用的替代方案。
 
-1. 正常安装 Cygwin 和 cygctl。
-2. 将 OpenClaw 的 shell 指向 Git Bash（Git Bash 继承 `BASH_ENV`，因此 `cyg`/`apt` 已自动可用）。
-3. OpenClaw 的 `system.run` 调用会落在一个已有 Cygwin 工具的 bash 进程中 —— 无需 WSL。
+**OpenClaw 在 Windows 上的 shell 选择逻辑：** 优先使用 PowerShell 7（`pwsh`），不可用时回退到 PowerShell 5.1。cygctl 安装器会直接将 `cyg` 和 `apt` 函数写入 PowerShell profile，因此 OpenClaw 启动的每一个 PowerShell 会话都能直接使用这些命令 —— 无需额外配置。
 
-```bash
-# 在 Windows + Cygwin 环境下，这些命令在 OpenClaw 的 shell 工具中均可直接使用
+```powershell
+# 在 Windows + Cygwin 环境下，这些命令在 OpenClaw 的 exec 工具中均可直接使用
 cyg ls -la /cygdrive/c/Users
 apt install git curl wget
 cyg python3 my_script.py

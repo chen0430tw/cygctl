@@ -239,14 +239,12 @@ cyg --help      # Show help
 
 ### OpenClaw on Windows without WSL
 
-[OpenClaw](https://openclaw.ai) is an open-source autonomous AI agent that runs shell commands via bash. Its official Windows support requires WSL2. If you're on a machine where WSL2 is unavailable (Hyper-V disabled by policy, no virtualisation, etc.), cygctl provides a drop-in alternative:
+[OpenClaw](https://openclaw.ai) is an open-source autonomous AI agent that executes shell commands on the host machine. Its official Windows documentation recommends WSL2. If WSL2 is unavailable (Hyper-V disabled by policy, no virtualisation support, etc.), cygctl provides a working alternative.
 
-1. Install Cygwin and cygctl as normal.
-2. Point OpenClaw's shell to Git Bash (which inherits `BASH_ENV` and therefore has `cyg`/`apt` available).
-3. OpenClaw's `system.run` calls land in a bash process that already has Cygwin tools in scope — no WSL needed.
+**How OpenClaw picks a shell on Windows:** it prefers PowerShell 7 (`pwsh`), falling back to PowerShell 5.1. cygctl's installer writes `cyg` and `apt` functions directly into your PowerShell profile, so they are available in every PowerShell session OpenClaw spawns — no extra configuration needed.
 
-```bash
-# These work inside OpenClaw's shell tool on Windows + Cygwin
+```powershell
+# These work inside OpenClaw's exec tool on Windows + Cygwin
 cyg ls -la /cygdrive/c/Users
 apt install git curl wget
 cyg python3 my_script.py
