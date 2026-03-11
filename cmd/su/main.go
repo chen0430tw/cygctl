@@ -46,7 +46,14 @@ func (w *msgWriter) Write(p []byte) (n int, err error) {
 	// Transcode only when the system uses a non-UTF-8 OEM codepage (e.g. 936 for GBK)
 	// and the bytes are not already valid UTF-8. This handles Windows native commands
 	// (icacls, net, dir, ...) that write in the OEM codepage when piped, while leaving
-	// bash/UTF-8 output untouched.
+	// UTF-8 output untouched.
+	//
+	// Limitation: ~8% of GBK code points (high byte 0xC2–0xDF, low byte 0x80–0xBF)
+	// are byte-for-byte identical to valid 2-byte UTF-8 sequences. A chunk consisting
+	// entirely of such characters (e.g. some uses of 权/限) will pass utf8.Valid and
+	// will NOT be transcoded. In practice most Windows command output mixes these with
+	// other GBK bytes (high byte ≤ 0xC1) that are unambiguously invalid UTF-8, so
+	// those chunks are caught and the whole line is transcoded correctly.
 	if w.fromCP != 0 && w.fromCP != 65001 && !utf8.Valid(p) {
 		data = oemToUTF8(p, w.fromCP)
 	}
@@ -377,7 +384,13 @@ func runClient(args []string) int {
 		enc.Encode(&msg{Name: "error", Error: err.Error()})
 		return 1
 	}
-	cp := getOEMCP()
+	// For interactive bash sessions (no explicit command) bash always outputs
+	// UTF-8, so transcoding is neither necessary nor safe. Only enable it when
+	// running an explicit Windows command that may write in the OEM code page.
+	var cp uint32
+	if len(cmdArgs) > 0 {
+		cp = getOEMCP()
+	}
 	cmd.Stdout = &msgWriter{enc: enc, name: "stdout", fromCP: cp}
 	cmd.Stderr = &msgWriter{enc: enc, name: "stderr", fromCP: cp}
 
