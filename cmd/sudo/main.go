@@ -3,6 +3,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/gob"
 	"encoding/hex"
@@ -30,6 +31,9 @@ var (
 	_waitNamedPipe   = _kernel32.NewProc("WaitNamedPipeW")
 	_attachConsole   = _kernel32.NewProc("AttachConsole")
 	_freeConsole     = _kernel32.NewProc("FreeConsole")
+
+	_secur32        = syscall.NewLazyDLL("secur32.dll")
+	_getUserNameExW = _secur32.NewProc("GetUserNameExW")
 )
 
 func waitNamedPipe(namePtr *uint16, timeoutMs uint32) error {
@@ -362,16 +366,20 @@ func main() {
 func runServer(args []string) int {
 	conn, err := tryConnectDaemon()
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "sudo: no daemon (%v), spawning...\n", err)
+		fmt.Fprintln(os.Stderr, "sudo: approve the UAC prompt to start cygsec daemon")
 		token, spawnErr := spawnDaemon()
 		if spawnErr != nil {
-			fmt.Fprintf(os.Stderr, "sudo: %v\n", spawnErr)
+			fmt.Fprintf(os.Stderr, "sudo: spawn failed: %v\n", spawnErr)
 			return 1
 		}
+		fmt.Fprintln(os.Stderr, "sudo: daemon spawned, waiting for it to start...")
 		conn, err = waitAndConnectDaemon(token)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sudo: %v\n", err)
 			return 1
 		}
+		fmt.Fprintln(os.Stderr, "sudo: daemon connected")
 	}
 	defer conn.Close()
 
@@ -379,6 +387,7 @@ func runServer(args []string) int {
 	dec := gob.NewDecoder(conn)
 
 	mode, parentPID := detectMode()
+	fmt.Fprintf(os.Stderr, "sudo: mode=%s pid=%d\n", mode, parentPID)
 	if err := enc.Encode(daemonRequest{
 		Environ:   os.Environ(),
 		Args:      args,
@@ -443,6 +452,10 @@ func runServer(args []string) int {
 		case "error":
 			fmt.Fprintln(os.Stderr, m.Error)
 		case "exit":
+			// Close the connection explicitly so the daemon's drain loop
+			// (io.Copy(io.Discard, conn)) unblocks and handleDaemonConn
+			// can finish cleanly.
+			conn.Close()
 			return m.Exit
 		}
 	}
@@ -479,12 +492,17 @@ func runDaemon(args []string) int {
 
 	lis, err := listenPipe(cygsecPipeName())
 	if err != nil {
+		// Write to a debug file since daemon has no console.
+		os.WriteFile(os.Getenv("LOCALAPPDATA")+"\\cygsec-debug.txt",
+			[]byte("listenPipe failed: "+err.Error()), 0600)
 		return 1
 	}
 	defer lis.Close()
 
 	// Signal readiness: write the token so the non-elevated client can connect.
 	if err := os.WriteFile(cygsecLockPath(), []byte(token), 0600); err != nil {
+		os.WriteFile(os.Getenv("LOCALAPPDATA")+"\\cygsec-debug.txt",
+			[]byte("WriteFile lock failed: "+err.Error()), 0600)
 		return 1
 	}
 
@@ -539,6 +557,7 @@ func handleDaemonConn(conn io.ReadWriteCloser, token string, stopFn func()) {
 
 	var clientToken string
 	if err := dec.Decode(&clientToken); err != nil {
+		daemonLog("handleDaemonConn: auth decode error: %v", err)
 		return
 	}
 	if clientToken != token {
@@ -549,8 +568,10 @@ func handleDaemonConn(conn io.ReadWriteCloser, token string, stopFn func()) {
 
 	var req daemonRequest
 	if err := dec.Decode(&req); err != nil {
+		daemonLog("handleDaemonConn: request decode error: %v", err)
 		return
 	}
+	daemonLog("handleDaemonConn: mode=%s args=%v", req.Mode, req.Args)
 
 	switch req.Mode {
 	case "kill":
@@ -564,8 +585,61 @@ func handleDaemonConn(conn io.ReadWriteCloser, token string, stopFn func()) {
 		execAttached(enc, req)
 
 	default: // "piped" + XP-compatible gob path
-		execPiped(enc, dec, req)
+		// stdinDone is closed by execPiped's internal stdin goroutine when it
+		// exits.  We wait for it before returning so that conn is no longer
+		// being read by two goroutines at once (the goroutine and io.Copy
+		// racing on the same pipe handle causes hangs in Git Bash / mintty).
+		stdinDone := make(chan struct{})
+		daemonLog("handleDaemonConn: execPiped starting")
+		execPiped(enc, dec, req, stdinDone)
+		daemonLog("handleDaemonConn: execPiped returned, waiting for stdin goroutine")
+		// The stdin goroutine holds dec and blocks on conn.Read. We must wait
+		// for it to exit before doing any further reads on conn, otherwise the
+		// two readers race and one may hang forever.
+		<-stdinDone
+		daemonLog("handleDaemonConn: stdin goroutine done, draining")
+		// Drain so the exit message reaches the client before conn.Close().
+		io.Copy(io.Discard, conn)
+		daemonLog("handleDaemonConn: drain done")
 	}
+}
+
+// daemonLog appends a timestamped message to the cygsec debug log file.
+// The daemon has no console so this is the only way to observe its behaviour.
+func daemonLog(format string, args ...interface{}) {
+	path := os.Getenv("LOCALAPPDATA") + `\cygsec-debug.txt`
+	line := fmt.Sprintf("[%s] "+format+"\n", append([]interface{}{time.Now().Format("15:04:05.000")}, args...)...)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return
+	}
+	defer f.Close()
+	f.WriteString(line)
+}
+
+// getCurrentUserName returns the current user in DOMAIN\user format (lowercase)
+// using secur32!GetUserNameExW — same output as Windows' whoami.exe but without
+// spawning a subprocess (which can hang 37+ seconds in the elevated daemon when
+// Cygwin's whoami.exe ends up on PATH and times out on NSS/domain lookups).
+func getCurrentUserName() string {
+	const nameSamCompatible = 2
+	var buf [256]uint16
+	n := uint32(len(buf))
+	r, _, _ := _getUserNameExW.Call(
+		nameSamCompatible,
+		uintptr(unsafe.Pointer(&buf[0])),
+		uintptr(unsafe.Pointer(&n)),
+	)
+	if r != 0 && n > 0 {
+		return strings.ToLower(windows.UTF16ToString(buf[:n]))
+	}
+	// Fallback: environment variables (always available in elevated context).
+	domain := os.Getenv("USERDOMAIN")
+	user := os.Getenv("USERNAME")
+	if domain != "" && user != "" {
+		return strings.ToLower(domain + `\` + user)
+	}
+	return strings.ToLower(user)
 }
 
 // execAttached runs a command with the daemon attached to the caller's console.
@@ -621,22 +695,46 @@ func execAttached(enc *gob.Encoder, req daemonRequest) {
 // pipe via gob encoding.  This is the XP-compatible path used whenever I/O is
 // redirected (pipes, files, or Cygwin PTY).  It also intercepts 'id' natively
 // to work around Cygwin FD-inheritance limitations in elevated processes.
-func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest) {
-	// Native 'id' interception (Cygwin FD inheritance doesn't work when the
-	// parent process is a Windows ShellExecuteEx/fodhelper-spawned process).
+func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest, stdinDone chan<- struct{}) {
+	// Native command interception — avoids spawning subprocesses that may
+	// misbehave in the elevated daemon (no console, unusual PATH, etc.).
 	if len(req.Args) > 0 {
-		if base := strings.ToLower(filepath.Base(req.Args[0])); base == "id" || base == "id.exe" {
+		base := strings.ToLower(filepath.Base(req.Args[0]))
+
+		// 'id' — Cygwin FD inheritance doesn't work when the parent process is
+		// a Windows ShellExecuteEx/fodhelper-spawned process.
+		if base == "id" || base == "id.exe" {
 			if out := buildIDOutput(req.Args, req.Environ); out != "" {
 				enc.Encode(&msg{Name: "stdout", Data: []byte(out + "\n")})
 				enc.Encode(&msg{Name: "exit", Exit: 0})
+				close(stdinDone)
 				return
 			}
+		}
+
+		// 'whoami' (no flags) — the elevated daemon's PATH may resolve to
+		// Cygwin's whoami.exe which hangs ~37 s on NSS/domain lookups then
+		// exits 1.  Use GetUserNameExW directly instead.
+		if (base == "whoami" || base == "whoami.exe") && len(req.Args) == 1 {
+			out := getCurrentUserName()
+			daemonLog("execPiped: whoami intercepted -> %q", out)
+			enc.Encode(&msg{Name: "stdout", Data: []byte(out + "\n")})
+			enc.Encode(&msg{Name: "exit", Exit: 0})
+			close(stdinDone)
+			return
 		}
 	}
 
 	if len(req.Args) > 0 {
 		req.Args[0] = convertCygwinPath(req.Args[0])
 	}
+	// Log which executable will actually be run so we can diagnose PATH issues.
+	if resolved, err := exec.LookPath(req.Args[0]); err != nil {
+		daemonLog("execPiped: LookPath(%q): %v", req.Args[0], err)
+	} else {
+		daemonLog("execPiped: LookPath(%q) -> %q", req.Args[0], resolved)
+	}
+	daemonLog("execPiped: running %v", req.Args)
 	req.Environ = append(req.Environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
 
 	cmd := exec.Command(req.Args[0], req.Args[1:]...)
@@ -646,16 +744,32 @@ func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest) {
 	if err != nil {
 		enc.Encode(&msg{Name: "error", Error: err.Error()})
 		enc.Encode(&msg{Name: "exit", Exit: 1})
+		close(stdinDone)
 		return
 	}
 
 	cp := getOEMCP()
 	cmd.Stdout = &msgWriter{enc: enc, name: "stdout", fromCP: cp}
-	cmd.Stderr = &msgWriter{enc: enc, name: "stderr", fromCP: cp}
+	// Tee stderr to the daemon log so subprocess error messages are visible
+	// even when the client disconnects before the command finishes.
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = io.MultiWriter(&msgWriter{enc: enc, name: "stderr", fromCP: cp}, &stderrBuf)
+
+	// cmdDone is closed once cmd.Run() returns so the stdin goroutine can
+	// exit promptly without waiting for the client to send EOF/close.
+	cmdDone := make(chan struct{})
 
 	go func() {
+		defer close(stdinDone)
 		defer stdinPipe.Close()
 		for {
+			// Check if the command has already finished; if so, stop reading
+			// from the connection so we don't race with io.Copy in the caller.
+			select {
+			case <-cmdDone:
+				return
+			default:
+			}
 			var m msg
 			if err := dec.Decode(&m); err != nil {
 				return
@@ -683,7 +797,13 @@ func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest) {
 			code = 1
 		}
 	}
+	if stderrBuf.Len() > 0 {
+		daemonLog("execPiped: subprocess stderr: %s", strings.TrimSpace(stderrBuf.String()))
+	}
+	daemonLog("execPiped: cmd done, exit=%d, sending exit msg", code)
+	close(cmdDone) // signal goroutine to stop reading
 	enc.Encode(&msg{Name: "exit", Exit: code})
+	daemonLog("execPiped: exit msg sent")
 }
 
 // ── Legacy one-shot elevated client (--client mode) ────────────────────────
@@ -790,23 +910,45 @@ func shellExecuteAsync(exe string, args []string) error {
 	)
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("elevation failed (UAC denied?): %v", err)
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to launch elevation: %v", err)
 	}
-	return nil
+	// Enforce a 60-second timeout so a missed UAC dialog does not leave
+	// the sudo process blocked indefinitely.
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			return fmt.Errorf("UAC denied or cancelled: %v", err)
+		}
+		return nil
+	case <-time.After(60 * time.Second):
+		cmd.Process.Kill()
+		return fmt.Errorf("elevation timed out — UAC prompt not approved within 60s")
+	}
 }
 
 func convertCygwinPath(p string) string {
+	// /cygdrive/X/... → X:\...
 	if strings.HasPrefix(p, "/cygdrive/") && len(p) >= 11 {
 		drive := p[10]
 		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
 			return string(drive) + ":" + strings.ReplaceAll(p[11:], "/", `\`)
 		}
 	}
+	// /X/... where X is a single drive letter → X:\...
 	if len(p) >= 3 && p[0] == '/' && p[2] == '/' {
 		drive := p[1]
 		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
 			return string(drive) + ":" + strings.ReplaceAll(p[2:], "/", `\`)
+		}
+	}
+	// Any other absolute Cygwin path (/opt/..., /usr/..., /home/...) →
+	// prepend the Cygwin installation root (e.g. C:\cygwin64).
+	if len(p) > 0 && p[0] == '/' {
+		if root := findCygwinRoot(); root != "" {
+			return root + strings.ReplaceAll(p, "/", `\`)
 		}
 	}
 	return p
