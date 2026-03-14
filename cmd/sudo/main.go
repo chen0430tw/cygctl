@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -261,6 +263,29 @@ func runClient(args []string) int {
 	// Convert Cygwin/Git-Bash paths to Windows paths so Windows can find the executable.
 	if len(cmdArgs) > 0 {
 		cmdArgs[0] = convertCygwinPath(cmdArgs[0])
+	}
+
+	// 'id' doesn't produce output when launched directly from a Windows parent
+	// (Cygwin FD inheritance doesn't initialise without a Cygwin parent process).
+	// Implement natively by reading /etc/passwd and /etc/group so the output
+	// matches what Cygwin's id would show, and supports common flags (-u/-g/-G/-n).
+	if len(cmdArgs) > 0 {
+		if base := strings.ToLower(filepath.Base(cmdArgs[0])); base == "id" || base == "id.exe" {
+			out := buildIDOutput(cmdArgs, environ)
+			if out != "" {
+				enc.Encode(&msg{Name: "stdout", Data: []byte(out + "\n")})
+				enc.Encode(&msg{Name: "exit", Exit: 0})
+				// Half-close our write direction so the server sees EOF and stops
+				// sending, then drain any remaining server data before we exit.
+				// This prevents a TCP RST (triggered by unread receive-buffer data)
+				// from discarding the messages we already sent.
+				if tc, ok := conn.(*net.TCPConn); ok {
+					tc.CloseWrite()
+				}
+				io.Copy(io.Discard, conn)
+				return 0
+			}
+		}
 	}
 	// Set NMAP_PRIVILEGED/NPING_PRIVILEGED so Cygwin-compiled nmap/nping treat
 	// this elevated process as privileged (geteuid() doesn't return 0 on Windows
@@ -560,6 +585,223 @@ func oemToUTF8(data []byte, fromCP uint32) []byte {
 		uintptr(unsafe.Pointer(&result[0])), nBytes,
 		0, 0,
 	)
+	return result
+}
+
+// idEntry holds a name/id pair used when formatting id output.
+type idEntry struct {
+	name string
+	id   int
+}
+
+// buildIDOutput implements the Cygwin 'id' command natively by reading
+// /etc/passwd and /etc/group from the local Cygwin installation.
+// Supported flags: -u (uid), -g (gid), -G (all groups), -n (name not number).
+func buildIDOutput(cmdArgs []string, environ []string) string {
+	flagU, flagG, flagGG, flagN := false, false, false, false
+	lookupName := ""
+	for _, a := range cmdArgs[1:] {
+		if strings.HasPrefix(a, "-") {
+			for _, c := range strings.TrimPrefix(a, "-") {
+				switch c {
+				case 'u':
+					flagU = true
+				case 'g':
+					flagG = true
+				case 'G':
+					flagGG = true
+				case 'n':
+					flagN = true
+				}
+			}
+		} else {
+			lookupName = a
+		}
+	}
+	windowsUser := ""
+	for _, e := range environ {
+		switch {
+		case strings.HasPrefix(e, "USER=") && lookupName == "":
+			lookupName = e[5:]
+		case strings.HasPrefix(e, "LOGNAME=") && lookupName == "":
+			lookupName = e[8:]
+		case strings.HasPrefix(e, "USERNAME="):
+			windowsUser = e[9:]
+		}
+	}
+
+	root := findCygwinRoot()
+	if root == "" {
+		return ""
+	}
+
+	// If USER/LOGNAME are unset (e.g. non-login shell), resolve the Cygwin
+	// username by matching the Windows USERNAME against the GECOS field in
+	// /etc/passwd (format: "U-MACHINE\user,SID").
+	if lookupName == "" && windowsUser != "" {
+		lookupName = findCygwinUsernameByWindowsUser(root, windowsUser)
+	}
+	if lookupName == "" {
+		return ""
+	}
+
+	uid, primaryGID, ok := readPasswdEntry(root, lookupName)
+	if !ok {
+		return ""
+	}
+	groups := readGroupEntries(root, lookupName, primaryGID)
+
+	primaryGrpName := ""
+	for _, g := range groups {
+		if g.id == primaryGID {
+			primaryGrpName = g.name
+			break
+		}
+	}
+
+	// groupName returns the name for a group entry, falling back to the
+	// numeric GID string when no /etc/group exists on this system.
+	groupName := func(g idEntry) string {
+		if g.name != "" {
+			return g.name
+		}
+		return strconv.Itoa(g.id)
+	}
+
+	switch {
+	case flagU && flagN:
+		return lookupName
+	case flagU:
+		return strconv.Itoa(uid)
+	case flagG && flagN:
+		return groupName(idEntry{name: primaryGrpName, id: primaryGID})
+	case flagG:
+		return strconv.Itoa(primaryGID)
+	case flagGG && flagN:
+		names := make([]string, len(groups))
+		for i, g := range groups {
+			names[i] = groupName(g)
+		}
+		return strings.Join(names, " ")
+	case flagGG:
+		ids := make([]string, len(groups))
+		for i, g := range groups {
+			ids[i] = strconv.Itoa(g.id)
+		}
+		return strings.Join(ids, " ")
+	}
+
+	// Default: full output
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "uid=%d(%s) gid=%d(%s) groups=", uid, lookupName, primaryGID,
+		groupName(idEntry{name: primaryGrpName, id: primaryGID}))
+	for i, g := range groups {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		fmt.Fprintf(&sb, "%d(%s)", g.id, groupName(g))
+	}
+	return sb.String()
+}
+
+// findCygwinUsernameByWindowsUser searches /etc/passwd for a GECOS field
+// containing the Windows username (format: "U-MACHINE\user,SID") and returns
+// the corresponding Cygwin username (field 0).
+func findCygwinUsernameByWindowsUser(root, windowsUser string) string {
+	data, err := os.ReadFile(filepath.Join(root, "etc", "passwd"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 5 {
+			continue
+		}
+		for _, part := range strings.Split(fields[4], ",") {
+			if idx := strings.LastIndex(part, `\`); idx >= 0 {
+				if strings.EqualFold(part[idx+1:], windowsUser) {
+					return fields[0]
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func findCygwinRoot() string {
+	for _, root := range []string{`C:\cygwin64`, `C:\cygwin`, `C:\tools\cygwin`} {
+		if _, err := os.Stat(filepath.Join(root, "etc", "passwd")); err == nil {
+			return root
+		}
+	}
+	return ""
+}
+
+func readPasswdEntry(root, username string) (uid, gid int, ok bool) {
+	data, err := os.ReadFile(filepath.Join(root, "etc", "passwd"))
+	if err != nil {
+		return 0, 0, false
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) >= 4 && fields[0] == username {
+			u, e1 := strconv.Atoi(fields[2])
+			g, e2 := strconv.Atoi(fields[3])
+			if e1 == nil && e2 == nil {
+				return u, g, true
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+func readGroupEntries(root, username string, primaryGID int) []idEntry {
+	data, err := os.ReadFile(filepath.Join(root, "etc", "group"))
+	if err != nil {
+		return []idEntry{{id: primaryGID}}
+	}
+
+	var result []idEntry
+	primaryFound := false
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if line == "" || line[0] == '#' {
+			continue
+		}
+		fields := strings.Split(line, ":")
+		if len(fields) < 4 {
+			continue
+		}
+		gid, err := strconv.Atoi(fields[2])
+		if err != nil {
+			continue
+		}
+		isPrimary := gid == primaryGID
+		isMember := false
+		for _, m := range strings.Split(fields[3], ",") {
+			if strings.TrimSpace(m) == username {
+				isMember = true
+				break
+			}
+		}
+		if isPrimary {
+			primaryFound = true
+			result = append([]idEntry{{name: fields[0], id: gid}}, result...)
+		} else if isMember {
+			result = append(result, idEntry{name: fields[0], id: gid})
+		}
+	}
+	if !primaryFound {
+		result = append([]idEntry{{id: primaryGID}}, result...)
+	}
 	return result
 }
 
