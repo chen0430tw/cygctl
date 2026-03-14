@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode/utf8"
@@ -26,9 +27,10 @@ const (
 	SW_HIDE                 = 0
 	SW_SHOW                 = 5
 
-	// How long to wait for the elevated process to connect back.
-	// If UAC is denied or the user dismisses the prompt, we give up after this.
-	acceptTimeout = 15 * time.Second
+	// How long to wait for the UAC-elevated daemon to come up.
+	daemonStartTimeout = 15 * time.Second
+	// Daemon exits after this long with no active connections.
+	daemonIdleTimeout = 5 * time.Minute
 )
 
 type SHELLEXECUTEINFO struct {
@@ -56,116 +58,62 @@ type msg struct {
 	Exit  int
 }
 
+// daemonRequest is sent by the non-elevated server to the elevated daemon
+// for each command invocation.
+type daemonRequest struct {
+	Environ []string
+	Args    []string
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: sudo <command> [args...]")
 		os.Exit(1)
 	}
-
-	// Internal client mode (runs elevated)
-	if os.Args[1] == "--client" {
+	switch os.Args[1] {
+	case "--client":
+		// Legacy one-shot elevated mode (kept for backward compatibility).
 		os.Exit(runClient(os.Args[2:]))
+	case "--daemon":
+		// Long-lived elevated daemon mode.
+		os.Exit(runDaemon(os.Args[2:]))
+	default:
+		os.Exit(runServer(os.Args[1:]))
 	}
-
-	args := os.Args[1:]
-	os.Exit(runServer(args))
 }
 
+// ── Non-elevated server ────────────────────────────────────────────────────
+
 func runServer(args []string) int {
-	// Create TCP listener on a random local port
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	lockPath := daemonLockPath()
+
+	// Try to connect to an already-running elevated daemon.
+	conn, err := tryConnectDaemon(lockPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: cannot create listener: %v\n", err)
-		return 1
-	}
-	defer lis.Close()
-
-	exe, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: cannot find executable: %v\n", err)
-		return 1
-	}
-
-	// Generate a random auth token so only our elevated process can connect.
-	tokenBytes := make([]byte, 16)
-	if _, err := rand.Read(tokenBytes); err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: cannot generate token: %v\n", err)
-		return 1
-	}
-	token := hex.EncodeToString(tokenBytes)
-
-	// Pass token as first argument after address so the elevated process knows it
-	cmdArgs := []string{"--client", lis.Addr().String(), token}
-	cmdArgs = append(cmdArgs, args...)
-
-	// Launch the elevated process in a goroutine; if it fails (UAC denied)
-	// close the listener so Accept() unblocks.
-	elevateErr := make(chan error, 1)
-	go func() {
-		err := shellExecuteAndWait(exe, cmdArgs)
-		elevateErr <- err
-		lis.Close()
-	}()
-
-	// Accept connection with timeout (guards against UAC denial / user dismissal)
-	type acceptResult struct {
-		conn net.Conn
-		err  error
-	}
-	ch := make(chan acceptResult, 1)
-	go func() {
-		conn, err := lis.Accept()
-		ch <- acceptResult{conn, err}
-	}()
-
-	var conn net.Conn
-	select {
-	case res := <-ch:
-		if res.err != nil {
-			// Could be UAC denial or genuine network error
-			select {
-			case err := <-elevateErr:
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "sudo: failed to elevate: %v\n", err)
-				} else {
-					fmt.Fprintln(os.Stderr, "sudo: elevated process did not connect")
-				}
-			default:
-				fmt.Fprintln(os.Stderr, "sudo: cannot accept connection (UAC denied?)")
-			}
+		// No daemon running — spawn one via UAC (one-time popup).
+		token, spawnErr := spawnDaemon()
+		if spawnErr != nil {
+			fmt.Fprintf(os.Stderr, "sudo: %v\n", spawnErr)
 			return 1
 		}
-		conn = res.conn
-	case <-time.After(acceptTimeout):
-		fmt.Fprintln(os.Stderr, "sudo: timed out waiting for elevated process (UAC denied?)")
-		lis.Close()
-		return 1
+		conn, err = waitAndConnectDaemon(lockPath, token)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "sudo: daemon did not start: %v\n", err)
+			return 1
+		}
 	}
 	defer conn.Close()
 
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 
-	// Step 1: Send token for client to verify (prevents rogue local connections)
-	if err := enc.Encode(token); err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: cannot send token: %v\n", err)
+	// Send the command request to the daemon.
+	if err := enc.Encode(daemonRequest{Environ: os.Environ(), Args: args}); err != nil {
+		fmt.Fprintf(os.Stderr, "sudo: cannot send request: %v\n", err)
 		return 1
 	}
 
-	// Step 2: Wait for client authentication acknowledgement
-	var ok bool
-	if err := dec.Decode(&ok); err != nil || !ok {
-		fmt.Fprintln(os.Stderr, "sudo: authentication failed — unexpected process connected")
-		return 1
-	}
-
-	// Step 3: Send environment to the elevated process
-	if err := enc.Encode(os.Environ()); err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: cannot send environment: %v\n", err)
-		return 1
-	}
-
-	// Handle Ctrl+C: forward interrupt signal to elevated process
+	// Forward Ctrl+C to the daemon.
 	sc := make(chan os.Signal, 1)
 	signal.Notify(sc, os.Interrupt)
 	go func() {
@@ -174,7 +122,7 @@ func runServer(args []string) int {
 		}
 	}()
 
-	// Forward stdin to elevated process
+	// Forward stdin to the daemon.
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -193,7 +141,7 @@ func runServer(args []string) int {
 		}
 	}()
 
-	// Receive and forward output / exit code from elevated process
+	// Receive and forward output / exit code from the daemon.
 	for {
 		var m msg
 		if err := dec.Decode(&m); err != nil {
@@ -211,6 +159,263 @@ func runServer(args []string) int {
 		}
 	}
 }
+
+// ── Daemon helpers ─────────────────────────────────────────────────────────
+
+func daemonLockPath() string {
+	user := os.Getenv("USERNAME")
+	if user == "" {
+		user = "default"
+	}
+	// Use LOCALAPPDATA rather than os.TempDir()/TEMP because Cygwin overrides
+	// TEMP to C:\cygwin64\tmp, while the elevated daemon (a pure Windows
+	// process) uses the real Windows temp dir. LOCALAPPDATA is not overridden
+	// by Cygwin, so both sides resolve to the same path.
+	dir := os.Getenv("LOCALAPPDATA")
+	if dir == "" {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "cygctl-sudo-"+user+".lock")
+}
+
+// readDaemonLock parses the lock file and returns the TCP address and token.
+func readDaemonLock(lockPath string) (addr, token string, err error) {
+	data, err := os.ReadFile(lockPath)
+	if err != nil {
+		return "", "", err
+	}
+	parts := strings.SplitN(strings.TrimSpace(string(data)), ":", 2)
+	if len(parts) != 2 {
+		return "", "", fmt.Errorf("malformed lock file")
+	}
+	return "127.0.0.1:" + parts[0], parts[1], nil
+}
+
+// tryConnectDaemon attempts to connect to and authenticate with an existing
+// elevated daemon. Returns a ready-to-use, authenticated connection or an error.
+func tryConnectDaemon(lockPath string) (net.Conn, error) {
+	addr, token, err := readDaemonLock(lockPath)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		os.Remove(lockPath) // stale lock file
+		return nil, err
+	}
+	enc := gob.NewEncoder(conn)
+	dec := gob.NewDecoder(conn)
+	if err := enc.Encode(token); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	var ok bool
+	if err := dec.Decode(&ok); err != nil || !ok {
+		conn.Close()
+		return nil, fmt.Errorf("daemon auth failed")
+	}
+	return conn, nil
+}
+
+// spawnDaemon launches an elevated daemon via UAC (ShellExecuteEx "runas").
+// The process runs as a background daemon; we do NOT wait for it to exit.
+// Returns the random token that the daemon will use for authentication.
+func spawnDaemon() (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", err
+	}
+	token := hex.EncodeToString(tokenBytes)
+	if err := shellExecuteAsync(exe, []string{"--daemon", token}); err != nil {
+		return "", fmt.Errorf("failed to elevate: %v", err)
+	}
+	return token, nil
+}
+
+// waitAndConnectDaemon polls the lock file until the daemon writes its port,
+// then connects and authenticates.
+func waitAndConnectDaemon(lockPath, token string) (net.Conn, error) {
+	deadline := time.Now().Add(daemonStartTimeout)
+	for time.Now().Before(deadline) {
+		addr, fileToken, err := readDaemonLock(lockPath)
+		if err == nil && fileToken == token {
+			conn, dialErr := net.DialTimeout("tcp", addr, 2*time.Second)
+			if dialErr == nil {
+				enc := gob.NewEncoder(conn)
+				dec := gob.NewDecoder(conn)
+				if encErr := enc.Encode(token); encErr == nil {
+					var ok bool
+					if decErr := dec.Decode(&ok); decErr == nil && ok {
+						return conn, nil
+					}
+				}
+				conn.Close()
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return nil, fmt.Errorf("timed out after %v", daemonStartTimeout)
+}
+
+// ── Elevated daemon ────────────────────────────────────────────────────────
+
+// runDaemon is the long-lived elevated process.
+// args: [token]
+func runDaemon(args []string) int {
+	if len(args) < 1 {
+		return 1
+	}
+	token := args[0]
+
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 1
+	}
+	defer lis.Close()
+
+	// Write the lock file so non-elevated sudo processes can find us.
+	lockPath := daemonLockPath()
+	port := lis.Addr().(*net.TCPAddr).Port
+	lockData := fmt.Sprintf("%d:%s", port, token)
+	if err := os.WriteFile(lockPath, []byte(lockData), 0600); err != nil {
+		return 1
+	}
+	defer os.Remove(lockPath)
+
+	// Enable all Windows admin privileges in our elevated token.
+	enableAllPrivileges()
+
+	// Idle timeout: exit after daemonIdleTimeout with no active connections.
+	var activeConns int32
+	var lastDoneNs int64
+	atomic.StoreInt64(&lastDoneNs, time.Now().UnixNano())
+
+	go func() {
+		for {
+			time.Sleep(30 * time.Second)
+			if atomic.LoadInt32(&activeConns) == 0 {
+				idle := time.Since(time.Unix(0, atomic.LoadInt64(&lastDoneNs)))
+				if idle >= daemonIdleTimeout {
+					lis.Close()
+					return
+				}
+			}
+		}
+	}()
+
+	for {
+		conn, err := lis.Accept()
+		if err != nil {
+			break
+		}
+		atomic.AddInt32(&activeConns, 1)
+		go func() {
+			defer func() {
+				atomic.AddInt32(&activeConns, -1)
+				atomic.StoreInt64(&lastDoneNs, time.Now().UnixNano())
+			}()
+			handleDaemonConn(conn, token)
+		}()
+	}
+	return 0
+}
+
+// handleDaemonConn handles one command invocation inside the elevated daemon.
+func handleDaemonConn(conn net.Conn, token string) {
+	defer conn.Close()
+
+	enc := gob.NewEncoder(conn)
+	dec := gob.NewDecoder(conn)
+
+	// Authenticate the connecting client.
+	var clientToken string
+	if err := dec.Decode(&clientToken); err != nil {
+		return
+	}
+	if clientToken != token {
+		enc.Encode(false)
+		return
+	}
+	if err := enc.Encode(true); err != nil {
+		return
+	}
+
+	// Receive the command request.
+	var req daemonRequest
+	if err := dec.Decode(&req); err != nil {
+		return
+	}
+
+	// Native 'id' implementation (avoids Cygwin FD-inheritance issues).
+	if len(req.Args) > 0 {
+		if base := strings.ToLower(filepath.Base(req.Args[0])); base == "id" || base == "id.exe" {
+			out := buildIDOutput(req.Args, req.Environ)
+			if out != "" {
+				enc.Encode(&msg{Name: "stdout", Data: []byte(out + "\n")})
+				enc.Encode(&msg{Name: "exit", Exit: 0})
+				return // defer conn.Close() handles clean shutdown
+			}
+		}
+	}
+
+	// Convert Cygwin path to Windows path for exec.
+	if len(req.Args) > 0 {
+		req.Args[0] = convertCygwinPath(req.Args[0])
+	}
+
+	req.Environ = append(req.Environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
+	cmd := exec.Command(req.Args[0], req.Args[1:]...)
+	cmd.Env = req.Environ
+
+	stdinPipe, err := cmd.StdinPipe()
+	if err != nil {
+		enc.Encode(&msg{Name: "error", Error: err.Error()})
+		return
+	}
+
+	cp := getOEMCP()
+	cmd.Stdout = &msgWriter{enc: enc, name: "stdout", fromCP: cp}
+	cmd.Stderr = &msgWriter{enc: enc, name: "stderr", fromCP: cp}
+
+	// Forward stdin / signals from the non-elevated server.
+	go func() {
+		defer stdinPipe.Close()
+		for {
+			var m msg
+			if err := dec.Decode(&m); err != nil {
+				return
+			}
+			switch m.Name {
+			case "stdin":
+				stdinPipe.Write(m.Data)
+			case "close":
+				return
+			case "ctrlc":
+				if cmd.Process != nil {
+					cmd.Process.Kill()
+				}
+				return
+			}
+		}
+	}()
+
+	code := 0
+	if err := cmd.Run(); err != nil {
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			code = exitErr.ExitCode()
+		} else {
+			enc.Encode(&msg{Name: "error", Error: err.Error()})
+			code = 1
+		}
+	}
+	enc.Encode(&msg{Name: "exit", Exit: code})
+}
+
+// ── Legacy one-shot elevated client (--client mode) ────────────────────────
 
 func runClient(args []string) int {
 	// args: <addr> <token> <cmd> [cmd-args...]
@@ -233,7 +438,6 @@ func runClient(args []string) int {
 	enc := gob.NewEncoder(conn)
 	dec := gob.NewDecoder(conn)
 
-	// Step 1: Receive and verify the auth token
 	var receivedToken string
 	if err := dec.Decode(&receivedToken); err != nil {
 		return 1
@@ -247,38 +451,23 @@ func runClient(args []string) int {
 		return 1
 	}
 
-	// Step 2: Receive environment from the (non-elevated) server
 	var environ []string
 	if err := dec.Decode(&environ); err != nil {
 		return 1
 	}
 
-	// Enable all privileges in our elevated token so that Windows-level access
-	// checks (raw sockets, SeDebugPrivilege, SeSecurityPrivilege, …) succeed
-	// for any program — not just nmap.  UAC elevation gives us the full admin
-	// privilege set but leaves most entries disabled; this enables them all.
 	enableAllPrivileges()
 
-	// Step 3: Run command with the received environment
-	// Convert Cygwin/Git-Bash paths to Windows paths so Windows can find the executable.
 	if len(cmdArgs) > 0 {
 		cmdArgs[0] = convertCygwinPath(cmdArgs[0])
 	}
 
-	// 'id' doesn't produce output when launched directly from a Windows parent
-	// (Cygwin FD inheritance doesn't initialise without a Cygwin parent process).
-	// Implement natively by reading /etc/passwd and /etc/group so the output
-	// matches what Cygwin's id would show, and supports common flags (-u/-g/-G/-n).
 	if len(cmdArgs) > 0 {
 		if base := strings.ToLower(filepath.Base(cmdArgs[0])); base == "id" || base == "id.exe" {
 			out := buildIDOutput(cmdArgs, environ)
 			if out != "" {
 				enc.Encode(&msg{Name: "stdout", Data: []byte(out + "\n")})
 				enc.Encode(&msg{Name: "exit", Exit: 0})
-				// Half-close our write direction so the server sees EOF and stops
-				// sending, then drain any remaining server data before we exit.
-				// This prevents a TCP RST (triggered by unread receive-buffer data)
-				// from discarding the messages we already sent.
 				if tc, ok := conn.(*net.TCPConn); ok {
 					tc.CloseWrite()
 				}
@@ -287,9 +476,7 @@ func runClient(args []string) int {
 			}
 		}
 	}
-	// Set NMAP_PRIVILEGED/NPING_PRIVILEGED so Cygwin-compiled nmap/nping treat
-	// this elevated process as privileged (geteuid() doesn't return 0 on Windows
-	// even when the process has admin rights).
+
 	environ = append(environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
 	cmd := exec.Command(cmdArgs[0], cmdArgs[1:]...)
 	cmd.Env = environ
@@ -304,7 +491,6 @@ func runClient(args []string) int {
 	cmd.Stdout = &msgWriter{enc: enc, name: "stdout", fromCP: cp}
 	cmd.Stderr = &msgWriter{enc: enc, name: "stderr", fromCP: cp}
 
-	// Forward stdin / signals from server
 	go func() {
 		defer stdinPipe.Close()
 		for {
@@ -326,7 +512,6 @@ func runClient(args []string) int {
 		}
 	}()
 
-	// Run command and report exit code
 	code := 0
 	if err := cmd.Run(); err != nil {
 		if exitErr, ok := err.(*exec.ExitError); ok {
@@ -341,22 +526,16 @@ func runClient(args []string) int {
 	return 0
 }
 
+// ── msgWriter ──────────────────────────────────────────────────────────────
+
 type msgWriter struct {
 	enc    *gob.Encoder
 	name   string
-	fromCP uint32 // OEM codepage for GBK→UTF-8 transcoding; 0 or 65001 = no-op
+	fromCP uint32
 }
 
 func (w *msgWriter) Write(p []byte) (n int, err error) {
 	data := p
-	// Transcode only when the system uses a non-UTF-8 OEM codepage (e.g. 936 for GBK)
-	// and the bytes are not already valid UTF-8, or contain GBK-exclusive byte pairs.
-	// This handles Windows native commands (icacls, net, dir, ...) that write in the
-	// OEM codepage when piped, while leaving genuine UTF-8 output untouched.
-	//
-	// GBK lead bytes 0x81–0x9F are definitively invalid as UTF-8 lead bytes. Their
-	// presence (∩ ≠ ∅ with the GBK-exclusive range) is a hard signal for GBK even
-	// when the surrounding bytes might otherwise pass utf8.Valid.
 	if w.fromCP != 0 && w.fromCP != 65001 && (!utf8.Valid(p) || containsGBKExclusiveBytes(p) || containsGBKBlindZoneBytes(p)) {
 		data = oemToUTF8(p, w.fromCP)
 	}
@@ -366,20 +545,14 @@ func (w *msgWriter) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-// getOEMCP returns the system OEM code page (e.g. 936 for Simplified Chinese).
-// This does not require a console to be attached.
+// ── Windows API helpers ────────────────────────────────────────────────────
+
 func getOEMCP() uint32 {
 	kernel32 := syscall.NewLazyDLL("kernel32.dll")
 	r, _, _ := kernel32.NewProc("GetOEMCP").Call()
 	return uint32(r)
 }
 
-// enableAllPrivileges enables every privilege that is present (but possibly
-// disabled) in the current process token.  UAC elevation populates the token
-// with the full administrator privilege set but starts most of them disabled.
-// Enabling them all means any subsequent Windows-level privilege check
-// (raw sockets, SeDebugPrivilege, SeSecurityPrivilege, SeBackupPrivilege, …)
-// will succeed for whatever program sudo runs — no per-program workarounds needed.
 func enableAllPrivileges() {
 	advapi32 := syscall.NewLazyDLL("advapi32.dll")
 	openProcessToken    := advapi32.NewProc("OpenProcessToken")
@@ -401,7 +574,6 @@ func enableAllPrivileges() {
 	}
 	defer syscall.CloseHandle(tok)
 
-	// First call: find out how large the TOKEN_PRIVILEGES buffer needs to be.
 	const tokenPrivilegesClass = 3
 	var needed uint32
 	getTokenInformation.Call(uintptr(tok), tokenPrivilegesClass, 0, 0, uintptr(unsafe.Pointer(&needed)))
@@ -419,32 +591,19 @@ func enableAllPrivileges() {
 		return
 	}
 
-	// TOKEN_PRIVILEGES layout:
-	//   uint32 PrivilegeCount                     — offset 0, 4 bytes
-	//   LUID_AND_ATTRIBUTES Privileges[count]     — offset 4, each 12 bytes
-	//     LUID (uint32 LowPart + int32 HighPart)  — 8 bytes
-	//     uint32 Attributes                       — 4 bytes  ← set SE_PRIVILEGE_ENABLED here
 	const (
-		sePrivilegeEnabled  = 0x00000002
-		luidAndAttrsSize    = 12 // 8-byte LUID + 4-byte Attributes
+		sePrivilegeEnabled = 0x00000002
+		luidAndAttrsSize   = 12
 	)
 	count := *(*uint32)(unsafe.Pointer(&buf[0]))
 	for i := uint32(0); i < count; i++ {
 		attrsOff := 4 + uintptr(i)*luidAndAttrsSize + 8
 		*(*uint32)(unsafe.Pointer(&buf[attrsOff])) |= sePrivilegeEnabled
 	}
-
-	// Passing the modified buffer re-enables everything in one call.
-	// Errors are intentionally ignored: partial success is still an improvement.
 	adjustTokenPrivs.Call(uintptr(tok), 0, uintptr(unsafe.Pointer(&buf[0])), 0, 0, 0)
 }
 
-// convertCygwinPath converts Cygwin-style paths to Windows paths.
-// /cygdrive/c/path -> C:\path
-// /c/path -> C:\path (Git Bash style)
-// Relative paths and already-Windows paths are returned unchanged.
 func convertCygwinPath(p string) string {
-	// /cygdrive/X/... format
 	if strings.HasPrefix(p, "/cygdrive/") && len(p) >= 11 {
 		drive := p[10]
 		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
@@ -452,7 +611,6 @@ func convertCygwinPath(p string) string {
 			return string(drive) + ":" + strings.ReplaceAll(rest, "/", `\`)
 		}
 	}
-	// /X/... format (Git Bash / MSYS2 short mount, e.g. /c/Users/...)
 	if len(p) >= 3 && p[0] == '/' && p[2] == '/' {
 		drive := p[1]
 		if (drive >= 'a' && drive <= 'z') || (drive >= 'A' && drive <= 'Z') {
@@ -463,18 +621,66 @@ func convertCygwinPath(p string) string {
 	return p
 }
 
-// containsGBKExclusiveBytes reports whether p contains any byte pair whose
-// lead byte is in the GBK-exclusive range 0x81–0x9F (definitively invalid as
-// a UTF-8 lead byte) followed by a valid GBK trail byte (0x40–0x7E or 0x80–0xFE).
-//
-// Valid UTF-8 multi-byte sequences are skipped so that 0x81–0x9F bytes
-// appearing as UTF-8 continuation bytes do not cause false positives.
+// shellExecuteAsync spawns an elevated process via ShellExecuteExW "runas"
+// and returns immediately without waiting for the process to exit.
+// Used to launch the background elevated daemon.
+func shellExecuteAsync(exe string, args []string) error {
+	cmdLine := makeCmdLine(args)
+
+	shell32 := syscall.NewLazyDLL("shell32.dll")
+	proc := shell32.NewProc("ShellExecuteExW")
+
+	verbPtr, _ := syscall.UTF16PtrFromString("runas")
+	filePtr, _ := syscall.UTF16PtrFromString(exe)
+	paramsPtr, _ := syscall.UTF16PtrFromString(cmdLine)
+
+	sei := SHELLEXECUTEINFO{
+		cbSize:       uint32(unsafe.Sizeof(SHELLEXECUTEINFO{})),
+		fMask:        SEE_MASK_NOCLOSEPROCESS,
+		lpVerb:       uintptr(unsafe.Pointer(verbPtr)),
+		lpFile:       uintptr(unsafe.Pointer(filePtr)),
+		lpParameters: uintptr(unsafe.Pointer(paramsPtr)),
+		nShow:        SW_HIDE,
+	}
+
+	ret, _, _ := proc.Call(uintptr(unsafe.Pointer(&sei)))
+	if ret == 0 {
+		return fmt.Errorf("ShellExecuteExW failed (UAC denied or error)")
+	}
+	// Close the handle immediately — daemon runs independently.
+	if sei.hProcess != 0 {
+		syscall.CloseHandle(syscall.Handle(sei.hProcess))
+	}
+	return nil
+}
+
+func makeCmdLine(args []string) string {
+	var parts []string
+	for _, arg := range args {
+		if needsQuoting(arg) {
+			parts = append(parts, `"`+strings.ReplaceAll(arg, `"`, `\"`)+`"`)
+		} else {
+			parts = append(parts, arg)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+func needsQuoting(s string) bool {
+	for _, c := range s {
+		if c == ' ' || c == '\t' || c == '"' || c == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+// ── GBK / OEM codepage helpers ─────────────────────────────────────────────
+
 func containsGBKExclusiveBytes(p []byte) bool {
 	i := 0
 	for i < len(p) {
 		b := p[i]
-		// Skip over valid UTF-8 multi-byte sequences so their continuation
-		// bytes (which may fall in 0x81–0x9F) are not mistaken for GBK lead bytes.
 		if b >= 0xC2 && b <= 0xF4 && i+1 < len(p) && p[i+1]&0xC0 == 0x80 {
 			switch {
 			case b < 0xE0:
@@ -486,8 +692,6 @@ func containsGBKExclusiveBytes(p []byte) bool {
 			}
 			continue
 		}
-		// A byte in 0x81–0x9F that is not inside a valid UTF-8 sequence is a
-		// GBK-exclusive lead byte. Confirm with a valid GBK trail byte.
 		if b >= 0x81 && b <= 0x9F && i+1 < len(p) {
 			t := p[i+1]
 			if (t >= 0x40 && t <= 0x7E) || (t >= 0x80 && t <= 0xFE) {
@@ -499,21 +703,9 @@ func containsGBKExclusiveBytes(p []byte) bool {
 	return false
 }
 
-// containsGBKBlindZoneBytes reports whether p looks like GBK bytes that
-// accidentally pass utf8.Valid. GBK pairs whose lead byte is in 0xC2–0xDF
-// and trail byte is in 0xA1–0xBF are valid 2-byte UTF-8 sequences, forming
-// a blind zone that containsGBKExclusiveBytes cannot reach.
-//
-// The detection uses ASCII bytes (spaces, newlines, colons, …) as phase-anchor
-// points: after each ASCII anchor we know we are at a character boundary, so
-// the length of the next multibyte sequence is meaningful. Real CJK Unicode
-// characters (U+4E00–U+9FFF) encode to 3-byte UTF-8 sequences (lead 0xE4–0xEF),
-// while GBK blind-zone pairs are always 2-byte. A buffer with suspicious
-// 2-byte sequences after anchors and no confirming 3-byte CJK sequences is
-// treated as GBK.
 func containsGBKBlindZoneBytes(p []byte) bool {
-	suspicious2 := 0 // 2-byte pairs in blind zone (0xC2–0xDF lead, 0xA1–0xBF trail)
-	confirmed3 := 0  // 3-byte CJK sequences (0xE4–0xEF lead) — proof of real UTF-8
+	suspicious2 := 0
+	confirmed3 := 0
 	afterAnchor := true
 
 	for i := 0; i < len(p); {
@@ -543,8 +735,6 @@ func containsGBKBlindZoneBytes(p []byte) bool {
 	return suspicious2 > 0 && confirmed3 == 0
 }
 
-// oemToUTF8 converts bytes from the given Windows OEM code page to UTF-8.
-// On failure it returns the original slice unchanged.
 func oemToUTF8(data []byte, fromCP uint32) []byte {
 	if len(data) == 0 {
 		return data
@@ -553,7 +743,6 @@ func oemToUTF8(data []byte, fromCP uint32) []byte {
 	mbtwc := kernel32.NewProc("MultiByteToWideChar")
 	wctmb := kernel32.NewProc("WideCharToMultiByte")
 
-	// Pass 1: how many UTF-16 code units do we need?
 	nWide, _, _ := mbtwc.Call(
 		uintptr(fromCP), 0,
 		uintptr(unsafe.Pointer(&data[0])), uintptr(len(data)),
@@ -569,9 +758,8 @@ func oemToUTF8(data []byte, fromCP uint32) []byte {
 		uintptr(unsafe.Pointer(&wbuf[0])), nWide,
 	)
 
-	// Pass 2: how many UTF-8 bytes do we need?
 	nBytes, _, _ := wctmb.Call(
-		65001, 0, // CP_UTF8
+		65001, 0,
 		uintptr(unsafe.Pointer(&wbuf[0])), nWide,
 		0, 0, 0, 0,
 	)
@@ -588,15 +776,13 @@ func oemToUTF8(data []byte, fromCP uint32) []byte {
 	return result
 }
 
-// idEntry holds a name/id pair used when formatting id output.
+// ── Native 'id' implementation ─────────────────────────────────────────────
+
 type idEntry struct {
 	name string
 	id   int
 }
 
-// buildIDOutput implements the Cygwin 'id' command natively by reading
-// /etc/passwd and /etc/group from the local Cygwin installation.
-// Supported flags: -u (uid), -g (gid), -G (all groups), -n (name not number).
 func buildIDOutput(cmdArgs []string, environ []string) string {
 	flagU, flagG, flagGG, flagN := false, false, false, false
 	lookupName := ""
@@ -618,6 +804,7 @@ func buildIDOutput(cmdArgs []string, environ []string) string {
 			lookupName = a
 		}
 	}
+
 	windowsUser := ""
 	for _, e := range environ {
 		switch {
@@ -635,9 +822,6 @@ func buildIDOutput(cmdArgs []string, environ []string) string {
 		return ""
 	}
 
-	// If USER/LOGNAME are unset (e.g. non-login shell), resolve the Cygwin
-	// username by matching the Windows USERNAME against the GECOS field in
-	// /etc/passwd (format: "U-MACHINE\user,SID").
 	if lookupName == "" && windowsUser != "" {
 		lookupName = findCygwinUsernameByWindowsUser(root, windowsUser)
 	}
@@ -659,8 +843,8 @@ func buildIDOutput(cmdArgs []string, environ []string) string {
 		}
 	}
 
-	// groupName returns the name for a group entry, falling back to the
-	// numeric GID string when no /etc/group exists on this system.
+	// groupName returns the name for a group entry, falling back to the numeric
+	// GID when /etc/group is absent (group info comes from Windows NSS instead).
 	groupName := func(g idEntry) string {
 		if g.name != "" {
 			return g.name
@@ -693,7 +877,8 @@ func buildIDOutput(cmdArgs []string, environ []string) string {
 
 	// Default: full output
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "uid=%d(%s) gid=%d(%s) groups=", uid, lookupName, primaryGID,
+	fmt.Fprintf(&sb, "uid=%d(%s) gid=%d(%s) groups=",
+		uid, lookupName, primaryGID,
 		groupName(idEntry{name: primaryGrpName, id: primaryGID}))
 	for i, g := range groups {
 		if i > 0 {
@@ -704,9 +889,6 @@ func buildIDOutput(cmdArgs []string, environ []string) string {
 	return sb.String()
 }
 
-// findCygwinUsernameByWindowsUser searches /etc/passwd for a GECOS field
-// containing the Windows username (format: "U-MACHINE\user,SID") and returns
-// the corresponding Cygwin username (field 0).
 func findCygwinUsernameByWindowsUser(root, windowsUser string) string {
 	data, err := os.ReadFile(filepath.Join(root, "etc", "passwd"))
 	if err != nil {
@@ -766,6 +948,7 @@ func readPasswdEntry(root, username string) (uid, gid int, ok bool) {
 func readGroupEntries(root, username string, primaryGID int) []idEntry {
 	data, err := os.ReadFile(filepath.Join(root, "etc", "group"))
 	if err != nil {
+		// No /etc/group — return just the primary GID with no name.
 		return []idEntry{{id: primaryGID}}
 	}
 
@@ -803,57 +986,4 @@ func readGroupEntries(root, username string, primaryGID int) []idEntry {
 		result = append([]idEntry{{id: primaryGID}}, result...)
 	}
 	return result
-}
-
-func shellExecuteAndWait(exe string, args []string) error {
-	cmdLine := makeCmdLine(args)
-
-	shell32 := syscall.NewLazyDLL("shell32.dll")
-	proc := shell32.NewProc("ShellExecuteExW")
-
-	verbPtr, _ := syscall.UTF16PtrFromString("runas")
-	filePtr, _ := syscall.UTF16PtrFromString(exe)
-	paramsPtr, _ := syscall.UTF16PtrFromString(cmdLine)
-
-	sei := SHELLEXECUTEINFO{
-		cbSize:       uint32(unsafe.Sizeof(SHELLEXECUTEINFO{})),
-		fMask:        SEE_MASK_NOCLOSEPROCESS,
-		lpVerb:       uintptr(unsafe.Pointer(verbPtr)),
-		lpFile:       uintptr(unsafe.Pointer(filePtr)),
-		lpParameters: uintptr(unsafe.Pointer(paramsPtr)),
-		nShow:        SW_HIDE,
-	}
-
-	ret, _, _ := proc.Call(uintptr(unsafe.Pointer(&sei)))
-	if ret == 0 {
-		return fmt.Errorf("ShellExecuteExW failed (UAC denied or error)")
-	}
-
-	if sei.hProcess != 0 {
-		syscall.WaitForSingleObject(syscall.Handle(sei.hProcess), syscall.INFINITE)
-		syscall.CloseHandle(syscall.Handle(sei.hProcess))
-	}
-
-	return nil
-}
-
-func makeCmdLine(args []string) string {
-	var parts []string
-	for _, arg := range args {
-		if needsQuoting(arg) {
-			parts = append(parts, `"`+strings.ReplaceAll(arg, `"`, `\"`)+`"`)
-		} else {
-			parts = append(parts, arg)
-		}
-	}
-	return strings.Join(parts, " ")
-}
-
-func needsQuoting(s string) bool {
-	for _, c := range s {
-		if c == ' ' || c == '\t' || c == '"' || c == '\\' {
-			return true
-		}
-	}
-	return false
 }
