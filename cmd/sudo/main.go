@@ -439,20 +439,17 @@ func main() {
 func runServer(args []string) int {
 	conn, err := tryConnectDaemon()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "sudo: no daemon (%v), spawning...\n", err)
 		fmt.Fprintln(os.Stderr, "sudo: approve the UAC prompt to start cygsec daemon")
 		token, spawnErr := spawnDaemon()
 		if spawnErr != nil {
 			fmt.Fprintf(os.Stderr, "sudo: spawn failed: %v\n", spawnErr)
 			return 1
 		}
-		fmt.Fprintln(os.Stderr, "sudo: daemon spawned, waiting for it to start...")
 		conn, err = waitAndConnectDaemon(token)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "sudo: %v\n", err)
 			return 1
 		}
-		fmt.Fprintln(os.Stderr, "sudo: daemon connected")
 	}
 	defer conn.Close()
 
@@ -460,7 +457,6 @@ func runServer(args []string) int {
 	dec := gob.NewDecoder(conn)
 
 	mode, parentPID := detectMode()
-	fmt.Fprintf(os.Stderr, "sudo: mode=%s pid=%d\n", mode, parentPID)
 	if err := enc.Encode(daemonRequest{
 		Environ:   os.Environ(),
 		Args:      args,
