@@ -31,10 +31,13 @@ var (
 	_waitNamedPipe   = _kernel32.NewProc("WaitNamedPipeW")
 	_attachConsole   = _kernel32.NewProc("AttachConsole")
 	_freeConsole     = _kernel32.NewProc("FreeConsole")
+	_cancelIoEx      = _kernel32.NewProc("CancelIoEx")
 
 	_secur32        = syscall.NewLazyDLL("secur32.dll")
 	_getUserNameExW = _secur32.NewProc("GetUserNameExW")
 )
+
+const fileFlagOverlapped = 0x40000000
 
 func waitNamedPipe(namePtr *uint16, timeoutMs uint32) error {
 	r, _, e := _waitNamedPipe.Call(uintptr(unsafe.Pointer(namePtr)), uintptr(timeoutMs))
@@ -86,23 +89,65 @@ type daemonRequest struct {
 // TCP sockets to named pipes. This keeps XP-era wire compatibility (gob+pipes
 // both work on Windows XP) while gaining the security properties of pipes.
 
-type pipeConn struct{ h windows.Handle }
+// pipeConn wraps a named pipe handle opened with FILE_FLAG_OVERLAPPED.
+// Using overlapped I/O allows concurrent ReadFile and WriteFile on the
+// same handle, which is required for full-duplex named pipe communication.
+type pipeConn struct {
+	h      windows.Handle
+	rEvent windows.Handle // manual-reset event for overlapped reads
+	wEvent windows.Handle // manual-reset event for overlapped writes
+}
+
+func newPipeConn(h windows.Handle) (*pipeConn, error) {
+	rEvent, err := windows.CreateEvent(nil, 1, 0, nil) // manual-reset, initially non-signaled
+	if err != nil {
+		return nil, err
+	}
+	wEvent, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		windows.CloseHandle(rEvent)
+		return nil, err
+	}
+	return &pipeConn{h: h, rEvent: rEvent, wEvent: wEvent}, nil
+}
 
 func (c *pipeConn) Read(b []byte) (int, error) {
+	windows.ResetEvent(c.rEvent)
+	var ov windows.Overlapped
+	ov.HEvent = c.rEvent
 	var n uint32
-	if err := windows.ReadFile(c.h, b, &n, nil); err != nil {
+	err := windows.ReadFile(c.h, b, &n, &ov)
+	if err == windows.ERROR_IO_PENDING {
+		err = windows.GetOverlappedResult(c.h, &ov, &n, true)
+	}
+	if err != nil {
 		return 0, err
 	}
 	return int(n), nil
 }
+
 func (c *pipeConn) Write(b []byte) (int, error) {
+	windows.ResetEvent(c.wEvent)
+	var ov windows.Overlapped
+	ov.HEvent = c.wEvent
 	var n uint32
-	if err := windows.WriteFile(c.h, b, &n, nil); err != nil {
+	err := windows.WriteFile(c.h, b, &n, &ov)
+	if err == windows.ERROR_IO_PENDING {
+		err = windows.GetOverlappedResult(c.h, &ov, &n, true)
+	}
+	if err != nil {
 		return 0, err
 	}
 	return int(n), nil
 }
-func (c *pipeConn) Close() error { return windows.CloseHandle(c.h) }
+
+func (c *pipeConn) Close() error {
+	// Cancel any pending overlapped I/O before closing handles.
+	_cancelIoEx.Call(uintptr(c.h), 0)
+	windows.CloseHandle(c.rEvent)
+	windows.CloseHandle(c.wEvent)
+	return windows.CloseHandle(c.h)
+}
 
 // pipeListener is a simple named-pipe accept loop: one pending instance is
 // always ready, and a new one is created before the current connection is
@@ -128,9 +173,27 @@ func (l *pipeListener) Accept() (*pipeConn, error) {
 	if curr == windows.InvalidHandle {
 		return nil, fmt.Errorf("listener closed")
 	}
-	// Block until a client connects (CloseHandle unblocks with an error).
-	err := windows.ConnectNamedPipe(curr, nil)
-	if err != nil && err != windows.ERROR_PIPE_CONNECTED {
+	// Use overlapped ConnectNamedPipe so we don't block the OS thread.
+	event, err := windows.CreateEvent(nil, 1, 0, nil)
+	if err != nil {
+		return nil, err
+	}
+	var ov windows.Overlapped
+	ov.HEvent = event
+	err = windows.ConnectNamedPipe(curr, &ov)
+	if err == windows.ERROR_IO_PENDING {
+		// Wait for a client to connect.
+		windows.WaitForSingleObject(event, windows.INFINITE)
+		var n uint32
+		err = windows.GetOverlappedResult(curr, &ov, &n, false)
+		if err == windows.ERROR_PIPE_CONNECTED {
+			err = nil
+		}
+	} else if err == windows.ERROR_PIPE_CONNECTED {
+		err = nil
+	}
+	windows.CloseHandle(event)
+	if err != nil {
 		return nil, err
 	}
 	// Pre-create the next instance before handing off this one.
@@ -138,7 +201,12 @@ func (l *pipeListener) Accept() (*pipeConn, error) {
 	l.mu.Lock()
 	l.curr = next
 	l.mu.Unlock()
-	return &pipeConn{h: curr}, nil
+	conn, err := newPipeConn(curr)
+	if err != nil {
+		windows.CloseHandle(curr)
+		return nil, err
+	}
+	return conn, nil
 }
 
 func (l *pipeListener) Close() error {
@@ -156,7 +224,7 @@ func createPipeInstance(name string, first bool) (windows.Handle, error) {
 	if err != nil {
 		return windows.InvalidHandle, err
 	}
-	openMode := uint32(windows.PIPE_ACCESS_DUPLEX)
+	openMode := uint32(windows.PIPE_ACCESS_DUPLEX | fileFlagOverlapped)
 	if first {
 		openMode |= fileFlagFirstPipeInstance
 	}
@@ -197,10 +265,15 @@ func dialPipe(name string, timeout time.Duration) (*pipeConn, error) {
 		h, err := windows.CreateFile(
 			namePtr,
 			windows.GENERIC_READ|windows.GENERIC_WRITE,
-			0, nil, windows.OPEN_EXISTING, 0, 0,
+			0, nil, windows.OPEN_EXISTING, fileFlagOverlapped, 0,
 		)
 		if err == nil {
-			return &pipeConn{h: h}, nil
+			pc, err := newPipeConn(h)
+			if err != nil {
+				windows.CloseHandle(h)
+				return nil, err
+			}
+			return pc, nil
 		}
 		if time.Now().After(deadline) {
 			return nil, fmt.Errorf("pipe connect timeout")
@@ -397,7 +470,6 @@ func runServer(args []string) int {
 		fmt.Fprintf(os.Stderr, "sudo: send error: %v\n", err)
 		return 1
 	}
-
 	if mode == "attached" {
 		// Console is shared directly; the client just waits for the exit code.
 		for {
@@ -739,6 +811,10 @@ func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest, stdinDone 
 
 	cmd := exec.Command(req.Args[0], req.Args[1:]...)
 	cmd.Env = req.Environ
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		HideWindow:    true,
+		CreationFlags: 0x08000000, // CREATE_NO_WINDOW
+	}
 
 	stdinPipe, err := cmd.StdinPipe()
 	if err != nil {
