@@ -53,32 +53,11 @@ func freeConsole() {
 }
 
 const (
-	SEE_MASK_NOCLOSEPROCESS  = 0x00000040
-	SW_HIDE                  = 0
 	fileFlagFirstPipeInstance = 0x00080000
 
 	daemonStartTimeout = 15 * time.Second
 	daemonIdleTimeout  = 24 * time.Hour
 )
-
-// SHELLEXECUTEINFO for the ShellExecuteExW fallback elevation path.
-type SHELLEXECUTEINFO struct {
-	cbSize         uint32
-	fMask          uint32
-	hwnd           uintptr
-	lpVerb         uintptr
-	lpFile         uintptr
-	lpParameters   uintptr
-	lpDirectory    uintptr
-	nShow          int32
-	hInstApp       uintptr
-	lpIDList       uintptr
-	lpClass        uintptr
-	hkeyClass      uintptr
-	dwHotKey       uint32
-	hIconOrMonitor uintptr
-	hProcess       uintptr
-}
 
 // msg is the gob-encoded envelope carried over the named pipe.
 type msg struct {
@@ -508,7 +487,6 @@ func runDaemon(args []string) int {
 	if err := os.WriteFile(cygsecLockPath(), []byte(token), 0600); err != nil {
 		return 1
 	}
-	defer os.Remove(cygsecLockPath())
 
 	enableAllPrivileges()
 
@@ -518,7 +496,12 @@ func runDaemon(args []string) int {
 		stopOnce    sync.Once
 	)
 	atomic.StoreInt64(&lastDoneNs, time.Now().UnixNano())
-	stopFn := func() { stopOnce.Do(func() { lis.Close() }) }
+	stopFn := func() {
+		stopOnce.Do(func() {
+			os.Remove(cygsecLockPath())
+			os.Exit(0)
+		})
+	}
 
 	// Idle watchdog: shut down after daemonIdleTimeout with no active connections.
 	go func() {
@@ -790,31 +773,25 @@ func enableAllPrivileges() {
 	adjustTokenPrivs.Call(uintptr(tok), 0, uintptr(unsafe.Pointer(&buf[0])), 0, 0, 0)
 }
 
-// shellExecuteAsync spawns an elevated process via ShellExecuteExW "runas"
-// without waiting for it.  Used as the fallback when fodhelper fails.
+// shellExecuteAsync spawns an elevated process via PowerShell Start-Process
+// -Verb RunAs.  PowerShell has a proper message pump so the UAC consent dialog
+// is reliably visible even when the caller is a Cygwin PTY process (where a
+// raw ShellExecuteExW call may produce an invisible background dialog).
 func shellExecuteAsync(exe string, args []string) error {
-	cmdLine := makeCmdLine(args)
-	sh32 := syscall.NewLazyDLL("shell32.dll")
-	proc := sh32.NewProc("ShellExecuteExW")
-
-	verbPtr, _ := syscall.UTF16PtrFromString("runas")
-	filePtr, _ := syscall.UTF16PtrFromString(exe)
-	paramsPtr, _ := syscall.UTF16PtrFromString(cmdLine)
-
-	sei := SHELLEXECUTEINFO{
-		cbSize:       uint32(unsafe.Sizeof(SHELLEXECUTEINFO{})),
-		fMask:        SEE_MASK_NOCLOSEPROCESS,
-		lpVerb:       uintptr(unsafe.Pointer(verbPtr)),
-		lpFile:       uintptr(unsafe.Pointer(filePtr)),
-		lpParameters: uintptr(unsafe.Pointer(paramsPtr)),
-		nShow:        SW_HIDE,
+	// Quote each argument for PowerShell's -ArgumentList array syntax.
+	quotedArgs := make([]string, len(args))
+	for i, a := range args {
+		quotedArgs[i] = "'" + strings.ReplaceAll(a, "'", "''") + "'"
 	}
-	ret, _, _ := proc.Call(uintptr(unsafe.Pointer(&sei)))
-	if ret == 0 {
-		return fmt.Errorf("ShellExecuteExW failed (UAC denied?)")
-	}
-	if sei.hProcess != 0 {
-		syscall.CloseHandle(syscall.Handle(sei.hProcess))
+	psExe := strings.ReplaceAll(exe, "'", "''")
+	psCmd := fmt.Sprintf(
+		"Start-Process -FilePath '%s' -ArgumentList %s -Verb RunAs -WindowStyle Hidden",
+		psExe, strings.Join(quotedArgs, ","),
+	)
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", psCmd)
+	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("elevation failed (UAC denied?): %v", err)
 	}
 	return nil
 }
