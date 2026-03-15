@@ -73,6 +73,15 @@ foreach ($binary in $Binaries) {
 # 2. Remove from machine-wide PATH
 Write-Host "[2/6] Cleaning PATH..." -ForegroundColor Green
 $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+
+# Backup current machine PATH to a timestamped file for recovery
+$backupDir = "$env:ProgramData\cygctl"
+if (-not (Test-Path $backupDir)) { New-Item -ItemType Directory -Path $backupDir -Force | Out-Null }
+$backupFile = "$backupDir\path_backup_$(Get-Date -Format 'yyyyMMdd_HHmmss').txt"
+$machinePath | Out-File -FilePath $backupFile -Encoding utf8
+Write-Host "  OK PATH backed up to $backupFile" -ForegroundColor Gray
+# Keep only the 5 most recent backups
+Get-ChildItem "$backupDir\path_backup_*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -Skip 5 | Remove-Item -Force
 if ($machinePath -like "*$InstallDir*") {
     $pathEntries = $machinePath -split ';' | Where-Object { $_ -and $_ -notlike "*$InstallDir*" }
 
