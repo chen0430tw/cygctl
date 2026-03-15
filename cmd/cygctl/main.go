@@ -77,6 +77,14 @@ func main() {
 		case arg == "--shutdown":
 			shutdownCygwin()
 			return
+		case arg == "--path" || arg == "-p":
+			if i+1 >= len(args) {
+				fmt.Fprintln(os.Stderr, "Error: Missing argument for --path")
+				fmt.Fprintln(os.Stderr, "Usage: cyg --path <path>")
+				os.Exit(1)
+			}
+			wslShowPathConversions(args[i+1])
+			return
 		case arg == "--exec" || arg == "-e":
 			if i+1 >= len(args) {
 				fmt.Fprintln(os.Stderr, "Error: Missing command for --exec")

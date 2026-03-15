@@ -172,7 +172,8 @@ func convertPathAllFormats(path string) (win, cyg, wsl string) {
 		wsl = normaliseUnix(path)
 
 	default:
-		// Generic POSIX path — cannot determine drive letter.
+		// Generic POSIX path (e.g. /tmp/foo) — no drive letter, cannot convert.
+		// Return as-is for all three formats.
 		win = path
 		cyg = path
 		wsl = path
@@ -205,9 +206,15 @@ func isLetter(c byte) bool {
 	return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
 }
 
-// normaliseWin normalises backslashes and ensures a trailing-slash-free path.
+// normaliseWin normalises backslashes. Preserves trailing backslash only for
+// drive roots (e.g. C:\) to keep them valid Win32 paths.
 func normaliseWin(p string) string {
-	return strings.TrimRight(strings.ReplaceAll(p, "/", `\`), `\`)
+	p = strings.ReplaceAll(p, "/", `\`)
+	// Only strip trailing backslash if it's not a drive root (C:\)
+	if len(p) > 3 {
+		p = strings.TrimRight(p, `\`)
+	}
+	return p
 }
 
 func normaliseUnix(p string) string {
@@ -239,10 +246,11 @@ func mountSuffixToWin(rest, original string) string {
 		return original
 	}
 	drive := strings.ToUpper(string(rest[0]))
-	tail := ""
-	if len(rest) > 1 {
-		tail = strings.ReplaceAll(rest[1:], "/", `\`)
+	if len(rest) == 1 {
+		// Drive root: /mnt/c → C:\
+		return drive + `:\`
 	}
+	tail := strings.ReplaceAll(rest[1:], "/", `\`)
 	return drive + ":" + tail
 }
 
