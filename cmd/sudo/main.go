@@ -436,11 +436,29 @@ func main() {
 
 // ── X11 forwarding ──────────────────────────────────────────────────────────
 
+// detectXWinDisplay probes for a running Cygwin/X (XWin) instance by checking
+// for X11 Unix-domain socket files under the Cygwin temp directory.
+// Returns the display string (e.g. ":0") or "" if none found.
+func detectXWinDisplay() string {
+	cygRoot := findCygwinRoot()
+	for i := 0; i <= 3; i++ {
+		socket := filepath.Join(cygRoot, "tmp", ".X11-unix", fmt.Sprintf("X%d", i))
+		if _, err := os.Stat(socket); err == nil {
+			return fmt.Sprintf(":%d", i)
+		}
+	}
+	return ""
+}
+
 // forwardX11 adjusts the environment for the elevated daemon so that X11 GUI
 // apps work correctly.  The elevated daemon is a new Win32 process — it has no
 // fork relationship with the caller and therefore cannot use Unix-domain X
 // sockets (DISPLAY=:N).  Switching to the TCP form (localhost:N.0) lets the
 // elevated process reach the X server over loopback instead.
+//
+// If DISPLAY is not set in the caller's environment (e.g. launched from a
+// plain Windows terminal rather than an X11 terminal), detectXWinDisplay()
+// is used to locate a running XWin instance automatically.
 //
 // If an XAUTHORITY file exists for the current display, its MIT-MAGIC-COOKIE
 // is written to a temp file that the elevated process can read, and XAUTHORITY
@@ -457,7 +475,13 @@ func forwardX11(environ []string) []string {
 		}
 	}
 	if display == "" {
-		return environ
+		// Caller has no DISPLAY — try to find a running XWin instance.
+		display = detectXWinDisplay()
+		if display == "" {
+			return environ // no X server found, nothing to forward
+		}
+		// Inject DISPLAY so the rebuild loop below includes it.
+		environ = append(environ, "DISPLAY="+display)
 	}
 
 	// Convert Unix-socket display (:N or :N.S) to TCP (localhost:N.S).
