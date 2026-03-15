@@ -861,9 +861,25 @@ func execAttached(enc *gob.Encoder, req daemonRequest) {
 	}()
 
 	if len(req.Args) > 0 {
-		req.Args[0] = convertCygwinPath(req.Args[0])
+		winPath := resolveWithEnvPath(req.Args[0], req.Environ)
+		if interp := resolveShebangInterpreter(winPath, req.Environ); interp != nil {
+			// Pass script as Cygwin path (not Windows path) so Cygwin interpreters understand it.
+			cygPath := winPathToCygwin(winPath, findCygwinRoot())
+			daemonLog("execAttached: shebang -> interp %v script %q", interp, cygPath)
+			req.Args[0] = cygPath
+			req.Args = append(interp, req.Args...)
+		} else {
+			req.Args[0] = winPath
+		}
 	}
+	daemonLog("execAttached: running %v", req.Args)
 	req.Environ = append(req.Environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
+
+	// Save console input mode and restore after command exits,
+	// in case the child process disables echo or changes terminal settings.
+	var savedConsoleMode uint32
+	conInHandle := windows.Handle(conIn.Fd())
+	savedOK := windows.GetConsoleMode(conInHandle, &savedConsoleMode) == nil
 
 	cmd := exec.Command(req.Args[0], req.Args[1:]...)
 	cmd.Env = req.Environ
@@ -874,9 +890,14 @@ func execAttached(enc *gob.Encoder, req daemonRequest) {
 		if exitErr, ok := err.(*exec.ExitError); ok {
 			code = exitErr.ExitCode()
 		} else {
+			daemonLog("execAttached: exec error: %v", err)
 			code = 1
 		}
 	}
+	if savedOK {
+		windows.SetConsoleMode(conInHandle, savedConsoleMode)
+	}
+	daemonLog("execAttached: exit=%d", code)
 	enc.Encode(&msg{Name: "exit", Exit: code})
 }
 
@@ -915,7 +936,15 @@ func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest, stdinDone 
 	}
 
 	if len(req.Args) > 0 {
-		req.Args[0] = convertCygwinPath(req.Args[0])
+		winPath := resolveWithEnvPath(req.Args[0], req.Environ)
+		if interp := resolveShebangInterpreter(winPath, req.Environ); interp != nil {
+			cygPath := winPathToCygwin(winPath, findCygwinRoot())
+			daemonLog("execPiped: shebang %q -> interp %v script %q", winPath, interp, cygPath)
+			req.Args[0] = cygPath
+			req.Args = append(interp, req.Args...)
+		} else {
+			req.Args[0] = winPath
+		}
 	}
 	// Log which executable will actually be run so we can diagnose PATH issues.
 	if resolved, err := exec.LookPath(req.Args[0]); err != nil {
@@ -1137,14 +1166,163 @@ func convertCygwinPath(p string) string {
 			return string(drive) + ":" + strings.ReplaceAll(p[2:], "/", `\`)
 		}
 	}
-	// Any other absolute Cygwin path (/opt/..., /usr/..., /home/...) →
-	// prepend the Cygwin installation root (e.g. C:\cygwin64).
-	if len(p) > 0 && p[0] == '/' {
-		if root := findCygwinRoot(); root != "" {
+	// Cygwin bind-mounts: /usr/bin → cygroot\bin, /usr/lib → cygroot\lib
+	if root := findCygwinRoot(); root != "" {
+		if strings.HasPrefix(p, "/usr/bin/") || p == "/usr/bin" {
+			return root + `\bin` + strings.ReplaceAll(p[8:], "/", `\`)
+		}
+		if strings.HasPrefix(p, "/usr/lib/") || p == "/usr/lib" {
+			return root + `\lib` + strings.ReplaceAll(p[8:], "/", `\`)
+		}
+		// Any other absolute Cygwin path (/opt/..., /usr/..., /home/...) →
+		// prepend the Cygwin installation root (e.g. C:\cygwin64).
+		if len(p) > 0 && p[0] == '/' {
 			return root + strings.ReplaceAll(p, "/", `\`)
 		}
+	} else if len(p) > 0 && p[0] == '/' {
+		return p
 	}
 	return p
+}
+
+// winPathToCygwin converts a Windows path under cygwinRoot back to a Cygwin path.
+// e.g. C:\cygwin64\usr\local\bin\zenmap → /usr/local/bin/zenmap
+func winPathToCygwin(p, cygwinRoot string) string {
+	if cygwinRoot == "" {
+		return p
+	}
+	rootLow := strings.ToLower(cygwinRoot)
+	pLow := strings.ToLower(p)
+	if strings.HasPrefix(pLow, rootLow) {
+		rel := p[len(cygwinRoot):]
+		return strings.ReplaceAll(rel, `\`, `/`)
+	}
+	return p
+}
+
+// readCygwinSymlink reads a Cygwin-format symlink file ("!<symlink>target").
+// The target may be UTF-8 or UTF-16 LE (with BOM \xff\xfe).
+// Returns the target path, or "" if not a Cygwin symlink.
+func readCygwinSymlink(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil || len(data) < 10 {
+		return ""
+	}
+	const magic = "!<symlink>"
+	if !strings.HasPrefix(string(data), magic) {
+		return ""
+	}
+	rest := data[len(magic):]
+	// UTF-16 LE with BOM
+	if len(rest) >= 2 && rest[0] == 0xff && rest[1] == 0xfe {
+		rest = rest[2:] // strip BOM
+		// decode UTF-16 LE pairs
+		var out []byte
+		for i := 0; i+1 < len(rest); i += 2 {
+			lo, hi := rest[i], rest[i+1]
+			if lo == 0 && hi == 0 {
+				break // null terminator
+			}
+			if hi == 0 {
+				out = append(out, lo) // ASCII range
+			}
+		}
+		return strings.TrimRight(string(out), "\r\n")
+	}
+	return strings.TrimRight(string(rest), "\x00\r\n")
+}
+
+// resolveWithEnvPath resolves a command name to a full Windows path.
+// If name is a Cygwin absolute path (/usr/...) it converts it.
+// If name is a bare command (no slashes/backslashes), it searches the
+// Cygwin PATH entries from environ so the daemon can find binaries in
+// directories like /usr/local/bin that aren't in its Windows PATH.
+func resolveWithEnvPath(name string, environ []string) string {
+	// Already a Cygwin absolute path — convert it, follow symlinks, try .exe.
+	if strings.HasPrefix(name, "/") {
+		p := convertCygwinPath(name)
+		if _, err := os.Stat(p); err == nil {
+			// Follow Cygwin-format symlinks (files starting with "!<symlink>")
+			if target := readCygwinSymlink(p); target != "" {
+				daemonLog("resolveWithEnvPath: cyglink %q -> %q", p, target)
+				return resolveWithEnvPath(target, environ)
+			}
+			return p
+		}
+		if _, err2 := os.Stat(p + ".exe"); err2 == nil {
+			return p + ".exe"
+		}
+		return p
+	}
+	// Already a Windows absolute or relative path — leave it.
+	if strings.ContainsAny(name, `\`) || (len(name) >= 2 && name[1] == ':') {
+		return name
+	}
+	// Bare name: search Cygwin PATH from environ.
+	var envPath string
+	for _, e := range environ {
+		if strings.HasPrefix(e, "PATH=") {
+			envPath = e[5:]
+			break
+		}
+	}
+	if envPath != "" {
+		// PATH may be Windows-style (semicolon-separated) or Cygwin-style
+		// (colon-separated). Detect by presence of semicolon.
+		sep := ":"
+		if strings.Contains(envPath, ";") {
+			sep = ";"
+		}
+		for _, dir := range strings.Split(envPath, sep) {
+			if dir == "" {
+				continue
+			}
+			winDir := convertCygwinPath(dir)
+			for _, ext := range []string{"", ".exe"} {
+				p := filepath.Join(winDir, name+ext)
+				if _, err := os.Stat(p); err == nil {
+					daemonLog("resolveWithEnvPath: %q -> %q", name, p)
+					return p
+				}
+			}
+		}
+	}
+	return name
+}
+
+// resolveShebangInterpreter checks if path is a script (starts with #!).
+// If so, returns the interpreter args to prepend; otherwise returns nil.
+// Handles both #!/usr/bin/python3 and #!/usr/bin/env python3 forms.
+func resolveShebangInterpreter(path string, environ []string) []string {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	buf := make([]byte, 256)
+	n, _ := f.Read(buf)
+	buf = buf[:n]
+	if len(buf) < 2 || buf[0] != '#' || buf[1] != '!' {
+		return nil
+	}
+	line := string(buf[2:])
+	if idx := strings.IndexByte(line, '\n'); idx >= 0 {
+		line = line[:idx]
+	}
+	parts := strings.Fields(strings.TrimSpace(line))
+	if len(parts) == 0 {
+		return nil
+	}
+	// #!/usr/bin/env python3 → resolve "python3" via PATH
+	if filepath.Base(parts[0]) == "env" && len(parts) > 1 {
+		resolved := resolveWithEnvPath(parts[1], environ)
+		result := []string{resolved}
+		return append(result, parts[2:]...)
+	}
+	// #!/usr/bin/python3 → convert Cygwin path
+	resolved := resolveWithEnvPath(parts[0], environ)
+	result := []string{resolved}
+	return append(result, parts[1:]...)
 }
 
 func makeCmdLine(args []string) string {
