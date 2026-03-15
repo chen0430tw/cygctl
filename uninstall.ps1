@@ -74,7 +74,27 @@ foreach ($binary in $Binaries) {
 Write-Host "[2/6] Cleaning PATH..." -ForegroundColor Green
 $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
 if ($machinePath -like "*$InstallDir*") {
-    $newPath = ($machinePath -split ';' | Where-Object { $_ -and $_ -notlike "*$InstallDir*" }) -join ';'
+    $pathEntries = $machinePath -split ';' | Where-Object { $_ -and $_ -notlike "*$InstallDir*" }
+
+    # Safety check: ensure essential Windows system directories survive the rewrite.
+    $essentialWinPaths = @(
+        "$env:SystemRoot\System32",
+        "$env:SystemRoot",
+        "$env:SystemRoot\System32\Wbem",
+        "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+    )
+    $added = @()
+    foreach ($p in $essentialWinPaths) {
+        if ($pathEntries -notcontains $p) {
+            $pathEntries += $p
+            $added += $p
+        }
+    }
+    if ($added.Count -gt 0) {
+        Write-Host "  FIXED Restored missing Windows system paths: $($added -join ', ')" -ForegroundColor Yellow
+    }
+
+    $newPath = $pathEntries -join ';'
     [Environment]::SetEnvironmentVariable("PATH", $newPath, "Machine")
     Write-Host "  OK Removed from machine PATH" -ForegroundColor Green
 } else {

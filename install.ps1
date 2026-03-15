@@ -132,6 +132,31 @@ foreach ($link in $hardlinks.GetEnumerator()) {
 # 2. Add to machine-wide PATH (all users)
 Write-Host "[2/6] Configuring PATH..." -ForegroundColor Green
 $machinePath = [Environment]::GetEnvironmentVariable("PATH", "Machine")
+
+# Safety check: ensure essential Windows system directories are present.
+# Multiple install/uninstall cycles can corrupt machine PATH if GetEnvironmentVariable
+# ever returns null or a partial value, causing SetEnvironmentVariable to overwrite
+# the full PATH with only the cygwin entry.
+$essentialWinPaths = @(
+    "$env:SystemRoot\System32",
+    "$env:SystemRoot",
+    "$env:SystemRoot\System32\Wbem",
+    "$env:SystemRoot\System32\WindowsPowerShell\v1.0"
+)
+$pathEntries = if ($machinePath) { $machinePath -split ';' | Where-Object { $_ } } else { @() }
+$added = @()
+foreach ($p in $essentialWinPaths) {
+    if ($pathEntries -notcontains $p) {
+        $pathEntries += $p
+        $added += $p
+    }
+}
+if ($added.Count -gt 0) {
+    $machinePath = $pathEntries -join ';'
+    [Environment]::SetEnvironmentVariable("PATH", $machinePath, "Machine")
+    Write-Host "  FIXED Restored missing Windows system paths: $($added -join ', ')" -ForegroundColor Yellow
+}
+
 if ($machinePath -like "*$InstallDir*") {
     Write-Host "  OK Already in machine PATH" -ForegroundColor Gray
 } else {
