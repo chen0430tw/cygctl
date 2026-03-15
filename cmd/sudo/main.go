@@ -434,6 +434,103 @@ func main() {
 	}
 }
 
+// ── X11 forwarding ──────────────────────────────────────────────────────────
+
+// forwardX11 adjusts the environment for the elevated daemon so that X11 GUI
+// apps work correctly.  The elevated daemon is a new Win32 process — it has no
+// fork relationship with the caller and therefore cannot use Unix-domain X
+// sockets (DISPLAY=:N).  Switching to the TCP form (localhost:N.0) lets the
+// elevated process reach the X server over loopback instead.
+//
+// If an XAUTHORITY file exists for the current display, its MIT-MAGIC-COOKIE
+// is written to a temp file that the elevated process can read, and XAUTHORITY
+// is updated to point at that file.
+func forwardX11(environ []string) []string {
+	display := ""
+	xauth := ""
+	for _, e := range environ {
+		switch {
+		case strings.HasPrefix(e, "DISPLAY="):
+			display = e[8:]
+		case strings.HasPrefix(e, "XAUTHORITY="):
+			xauth = e[11:]
+		}
+	}
+	if display == "" {
+		return environ
+	}
+
+	// Convert Unix-socket display (:N or :N.S) to TCP (localhost:N.S).
+	// Elevated Win32 processes cannot share Cygwin's /tmp/.X11-unix sockets.
+	tcpDisplay := display
+	if strings.HasPrefix(display, ":") {
+		// :0 → localhost:0.0,  :0.1 → localhost:0.1
+		rest := display[1:] // "0" or "0.1"
+		if !strings.Contains(rest, ".") {
+			rest += ".0"
+		}
+		tcpDisplay = "localhost:" + rest
+	}
+
+	// Try to copy the xauth cookie so the elevated process can authenticate.
+	// XWin (Cygwin/X) uses -auth /home/user/.serverauth.PID rather than
+	// ~/.Xauthority, so we probe several candidate paths including the
+	// Cygwin home directory (C:\cygwin64\home\<user>) which differs from
+	// the Windows home (C:\Users\<user>).
+	if xauth == "" {
+		winHome, _ := os.UserHomeDir()
+		cygHome := filepath.Join(findCygwinRoot(), "home", os.Getenv("USERNAME"))
+		homes := []string{cygHome, winHome}
+
+		var candidates []string
+		for _, home := range homes {
+			candidates = append(candidates, filepath.Join(home, ".Xauthority"))
+			if matches, err := filepath.Glob(filepath.Join(home, ".serverauth.*")); err == nil {
+				candidates = append(candidates, matches...)
+			}
+		}
+		for _, c := range candidates {
+			if _, err := os.Stat(c); err == nil {
+				xauth = c
+				break
+			}
+		}
+	}
+	// Don't convert to TCP for Cygwin/X — it uses shared memory (no -listen tcp).
+	// Keep DISPLAY as-is so the elevated process connects via the same socket.
+	tcpDisplay = display
+
+	newXauth := ""
+	if xauth != "" {
+		if data, err := os.ReadFile(xauth); err == nil && len(data) > 0 {
+			tmp, err := os.CreateTemp("", "cygsudo-xauth-*")
+			if err == nil {
+				if _, err := tmp.Write(data); err == nil {
+					newXauth = tmp.Name()
+				}
+				tmp.Close()
+			}
+		}
+	}
+
+	// Rebuild environ with updated DISPLAY (and XAUTHORITY if we got a cookie).
+	out := make([]string, 0, len(environ))
+	for _, e := range environ {
+		switch {
+		case strings.HasPrefix(e, "DISPLAY="):
+			out = append(out, "DISPLAY="+tcpDisplay)
+		case strings.HasPrefix(e, "XAUTHORITY=") && newXauth != "":
+			// replaced below
+		default:
+			out = append(out, e)
+		}
+	}
+	if newXauth != "" {
+		out = append(out, "XAUTHORITY="+newXauth)
+	}
+	return out
+}
+
 // ── Non-elevated server ─────────────────────────────────────────────────────
 
 func runServer(args []string) int {
@@ -458,7 +555,7 @@ func runServer(args []string) int {
 
 	mode, parentPID := detectMode()
 	if err := enc.Encode(daemonRequest{
-		Environ:   os.Environ(),
+		Environ:   forwardX11(os.Environ()),
 		Args:      args,
 		Mode:      mode,
 		ParentPID: parentPID,
