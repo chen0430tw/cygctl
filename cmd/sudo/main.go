@@ -874,6 +874,7 @@ func execAttached(enc *gob.Encoder, req daemonRequest) {
 	}
 	daemonLog("execAttached: running %v", req.Args)
 	req.Environ = append(req.Environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
+	req.Environ = injectNpcapPath(req.Environ)
 
 	// Save console input mode and restore after command exits,
 	// in case the child process disables echo or changes terminal settings.
@@ -954,6 +955,7 @@ func execPiped(enc *gob.Encoder, dec *gob.Decoder, req daemonRequest, stdinDone 
 	}
 	daemonLog("execPiped: running %v", req.Args)
 	req.Environ = append(req.Environ, "NMAP_PRIVILEGED=1", "NPING_PRIVILEGED=1")
+	req.Environ = injectNpcapPath(req.Environ)
 
 	cmd := exec.Command(req.Args[0], req.Args[1:]...)
 	cmd.Env = req.Environ
@@ -1230,6 +1232,30 @@ func readCygwinSymlink(path string) string {
 		return strings.TrimRight(string(out), "\r\n")
 	}
 	return strings.TrimRight(string(rest), "\x00\r\n")
+}
+
+// injectNpcapPath ensures the Npcap directory is in PATH so that pcap-based
+// tools (hping3, tcpdump, nmap, tshark, etc.) can find wpcap.dll and its
+// dependencies (Packet.dll) when running elevated.  The elevated daemon has
+// a clean Windows PATH that typically omits C:\Windows\System32\Npcap.
+func injectNpcapPath(environ []string) []string {
+	const npcapDir = `C:\Windows\System32\Npcap`
+	if _, err := os.Stat(npcapDir); err != nil {
+		return environ // Npcap not installed
+	}
+	for i, e := range environ {
+		if !strings.HasPrefix(strings.ToUpper(e), "PATH=") {
+			continue
+		}
+		val := e[5:]
+		if strings.Contains(strings.ToUpper(val), strings.ToUpper(npcapDir)) {
+			return environ // already present
+		}
+		environ[i] = "PATH=" + npcapDir + ";" + val
+		return environ
+	}
+	// No PATH entry at all — add one.
+	return append(environ, "PATH="+npcapDir)
 }
 
 // resolveWithEnvPath resolves a command name to a full Windows path.
