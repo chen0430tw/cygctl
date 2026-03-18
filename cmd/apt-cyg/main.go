@@ -17,6 +17,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/ulikunitz/xz"
 )
 
 const (
@@ -136,7 +138,11 @@ func main() {
 	// Read configuration from setup.rc (mirror, cache)
 	readSetupRC()
 
-	// Ensure cache directory exists (CurrentCache may differ from CacheDir after readSetupRC)
+	// Sync CacheDir and SetupIni with CurrentCache (may have changed in readSetupRC)
+	CacheDir = CurrentCache
+	SetupIni = CurrentCache + `\setup.ini`
+
+	// Ensure cache directory exists
 	os.MkdirAll(CurrentCache, 0755)
 	os.MkdirAll(InstalledDir, 0755)
 
@@ -430,15 +436,28 @@ func tryDownloadSetup(filename string) bool {
 	ext := filepath.Ext(filename)
 	switch ext {
 	case ".xz":
-		bashExe := filepath.Join(CygwinRoot, "bin", "bash.exe")
-		cygTmp := toCygwinPath(tmpPath)
-		cygDest := toCygwinPath(SetupIni)
-		decompressed := strings.TrimSuffix(tmpPath, ".xz")
-		cmd := exec.Command(bashExe, "--login", "-c",
-			fmt.Sprintf("xz -d '%s' && mv '%s' '%s'",
-				cygTmp, toCygwinPath(decompressed), cygDest))
-		if err := cmd.Run(); err != nil {
+		f, err := os.Open(tmpPath)
+		if err != nil {
+			return false
+		}
+		xr, err := xz.NewReader(f)
+		if err != nil {
+			f.Close()
 			os.Remove(tmpPath)
+			return false
+		}
+		out2, err := os.Create(SetupIni)
+		if err != nil {
+			f.Close()
+			os.Remove(tmpPath)
+			return false
+		}
+		_, copyErr := io.Copy(out2, xr)
+		out2.Close()
+		f.Close()
+		os.Remove(tmpPath)
+		if copyErr != nil {
+			os.Remove(SetupIni)
 			return false
 		}
 
