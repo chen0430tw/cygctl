@@ -504,6 +504,7 @@ func cmdSearch(pattern string) {
 	}
 
 	fmt.Println("Searching downloaded packages...")
+	matched := 0
 	for name, pkg := range packages {
 		if re.MatchString(name) || re.MatchString(pkg.Description) {
 			status := " "
@@ -511,7 +512,11 @@ func cmdSearch(pattern string) {
 				status = "i"
 			}
 			fmt.Printf("[%s] %-30s %s\n", status, name, pkg.Description)
+			matched++
 		}
+	}
+	if matched == 0 {
+		fmt.Println("No packages found.")
 	}
 }
 
@@ -578,7 +583,11 @@ func cmdListall(pattern string) {
 		}
 		fmt.Printf("[%s] %-30s %s\n", status, name, pkg.Description)
 	}
-	fmt.Printf("\n%d package(s) found.\n", len(matched))
+	if len(matched) == 0 {
+		fmt.Println("No packages found.")
+	} else {
+		fmt.Printf("\n%d package(s) found.\n", len(matched))
+	}
 }
 
 // ==================== LISTFILES ====================
