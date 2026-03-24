@@ -450,7 +450,7 @@ func runClient(args []string) int {
 				cmdArgs = parts
 			}
 		}
-		cmd = exec.Command(cmdArgs[0], cmdArgs[1:]...)
+		cmd = exec.Command(resolveExe(cmdArgs[0]), cmdArgs[1:]...)
 	} else {
 		cmd = exec.Command(bashExe, "--login", "-i")
 	}
@@ -627,6 +627,42 @@ func spawnAsUser(username, domain, password, exe string, args []string) error {
 	windows.CloseHandle(pi.Process)
 	windows.CloseHandle(pi.Thread)
 	return nil
+}
+
+// resolveExe finds the absolute path of an executable by searching PATH
+// directories explicitly, skipping '.' and empty entries.  This avoids
+// Go 1.19+'s ErrDot rejection when exec.LookPath finds the binary relative
+// to the current directory (Windows legacy behaviour).
+func resolveExe(name string) string {
+	if filepath.IsAbs(name) || strings.ContainsAny(name, `/\`) {
+		return name
+	}
+	pathExt := os.Getenv("PATHEXT")
+	if pathExt == "" {
+		pathExt = ".COM;.EXE;.BAT;.CMD"
+	}
+	exts := strings.Split(strings.ToUpper(pathExt), ";")
+	for _, dir := range filepath.SplitList(os.Getenv("PATH")) {
+		if dir == "" || dir == "." {
+			continue
+		}
+		// Try with each PATHEXT extension.
+		for _, ext := range exts {
+			if strings.ToUpper(filepath.Ext(name)) == ext {
+				// Name already has this extension — try as-is.
+				candidate := filepath.Join(dir, name)
+				if _, err := os.Stat(candidate); err == nil {
+					return candidate
+				}
+				break
+			}
+			candidate := filepath.Join(dir, name+ext)
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
+	return name // fallback: let the OS decide
 }
 
 func makeCmdLine(args []string) string {
