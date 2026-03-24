@@ -205,6 +205,9 @@ func main() {
 
 	username := os.Args[1]
 	cmdArgs := os.Args[2:]
+	if isSpecialUser(username) {
+		os.Exit(runServerAsToken(username, cmdArgs))
+	}
 	os.Exit(runServer(username, cmdArgs))
 }
 
