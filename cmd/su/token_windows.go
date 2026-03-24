@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"regexp"
 	"strings"
 	"time"
 	"unsafe"
@@ -397,6 +398,35 @@ func runServerAsToken(username string, cmdArgs []string) int {
 		}
 	}()
 
+	// Build a display-name rewriter: map Windows identity strings to the
+	// friendly name the caller used (e.g. "NT AUTHORITY\SYSTEM" → "root").
+	// Uses regexp for case-insensitive matching without lowercasing all output.
+	var rewritePatterns []*regexp.Regexp
+	var rewriteTarget string
+	switch strings.ToLower(username) {
+	case "root", "system", "sys":
+		if strings.ToLower(username) == "root" {
+			rewriteTarget = "root"
+		} else {
+			rewriteTarget = "SYSTEM"
+		}
+		rewritePatterns = []*regexp.Regexp{
+			regexp.MustCompile(`(?i)NT AUTHORITY\\SYSTEM`), // Windows whoami
+			regexp.MustCompile(`(?im)^SYSTEM\r?$`),         // Cygwin whoami
+		}
+	case "ti", "trustedinstaller":
+		rewriteTarget = "trustedinstaller"
+		rewritePatterns = []*regexp.Regexp{
+			regexp.MustCompile(`(?i)NT SERVICE\\TrustedInstaller`),
+		}
+	}
+	rewrite := func(data []byte) []byte {
+		for _, re := range rewritePatterns {
+			data = re.ReplaceAll(data, []byte(rewriteTarget))
+		}
+		return data
+	}
+
 	for {
 		var m msg
 		if err := dec.Decode(&m); err != nil {
@@ -404,9 +434,9 @@ func runServerAsToken(username string, cmdArgs []string) int {
 		}
 		switch m.Name {
 		case "stdout":
-			os.Stdout.Write(m.Data)
+			os.Stdout.Write(rewrite(m.Data))
 		case "stderr":
-			os.Stderr.Write(m.Data)
+			os.Stderr.Write(rewrite(m.Data))
 		case "error":
 			fmt.Fprintln(os.Stderr, m.Error)
 		case "exit":
