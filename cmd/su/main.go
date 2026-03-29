@@ -39,20 +39,44 @@ type msgWriter struct {
 	enc    *gob.Encoder
 	name   string
 	fromCP uint32 // OEM codepage for GBK→UTF-8 transcoding; 0 or 65001 = no-op
+	tail   []byte // incomplete UTF-8 sequence carried over from the previous Write
 }
 
 func (w *msgWriter) Write(p []byte) (n int, err error) {
-	data := p
-	// Transcode only when the system uses a non-UTF-8 OEM codepage (e.g. 936 for GBK)
-	// and the bytes are not already valid UTF-8, or contain GBK-exclusive byte pairs.
-	// This handles Windows native commands (icacls, net, dir, ...) that write in the
-	// OEM codepage when piped, while leaving genuine UTF-8 output untouched.
-	//
-	// GBK lead bytes 0x81–0x9F are definitively invalid as UTF-8 lead bytes. Their
-	// presence (∩ ≠ ∅ with the GBK-exclusive range) is a hard signal for GBK even
-	// when the surrounding bytes might otherwise pass utf8.Valid.
-	if w.fromCP != 0 && w.fromCP != 65001 && (!utf8.Valid(p) || containsGBKExclusiveBytes(p) || containsGBKBlindZoneBytes(p)) {
-		data = oemToUTF8(p, w.fromCP)
+	// Prepend any incomplete UTF-8 sequence left over from the previous call so
+	// that the validity check and GBK detection always see complete sequences.
+	buf := p
+	if len(w.tail) > 0 {
+		buf = append(w.tail, p...)
+		w.tail = nil
+	}
+
+	// If the OEM code page is UTF-8 (or unset) there is nothing to transcode.
+	// Otherwise check whether the data looks like GBK and transcode if so.
+	// Before checking, strip any incomplete trailing UTF-8 sequence and save it
+	// for the next Write so it never triggers a false-positive validity failure.
+	data := buf
+	if w.fromCP != 0 && w.fromCP != 65001 {
+		complete, incomplete := splitIncompleteUTF8Tail(buf)
+		w.tail = append(w.tail, incomplete...)
+
+		// Transcode only when the system uses a non-UTF-8 OEM codepage (e.g. 936 for GBK)
+		// and the bytes are not already valid UTF-8, or contain GBK-exclusive byte pairs.
+		// This handles Windows native commands (icacls, net, dir, ...) that write in the
+		// OEM codepage when piped, while leaving genuine UTF-8 output untouched.
+		//
+		// GBK lead bytes 0x81–0x9F are definitively invalid as UTF-8 lead bytes. Their
+		// presence (∩ ≠ ∅ with the GBK-exclusive range) is a hard signal for GBK even
+		// when the surrounding bytes might otherwise pass utf8.Valid.
+		if !utf8.Valid(complete) || containsGBKExclusiveBytes(complete) || containsGBKBlindZoneBytes(complete) {
+			data = oemToUTF8(complete, w.fromCP)
+		} else {
+			data = complete
+		}
+	}
+
+	if len(data) == 0 {
+		return len(p), nil
 	}
 	if err := w.enc.Encode(&msg{Name: w.name, Data: data}); err != nil {
 		return 0, err
@@ -66,6 +90,36 @@ func getOEMCP() uint32 {
 	kernel32 := windows.NewLazySystemDLL("kernel32.dll")
 	r, _, _ := kernel32.NewProc("GetOEMCP").Call()
 	return uint32(r)
+}
+
+// splitIncompleteUTF8Tail splits p into a complete prefix and an incomplete
+// UTF-8 trailing sequence (at most 3 bytes).  If the last few bytes of p form
+// the start of a multi-byte UTF-8 sequence that is cut off, they are returned
+// as the second value so the caller can defer them to the next Write call.
+// This prevents utf8.Valid from returning false on otherwise-valid UTF-8 data
+// that was simply fragmented at a multi-byte boundary.
+func splitIncompleteUTF8Tail(p []byte) (complete, incomplete []byte) {
+	// Walk backwards up to 3 bytes looking for a multi-byte lead byte that
+	// does not have enough continuation bytes to complete the sequence.
+	for i := len(p) - 1; i >= 0 && i >= len(p)-3; i-- {
+		b := p[i]
+		var want int
+		switch {
+		case b >= 0xF0:
+			want = 4
+		case b >= 0xE0:
+			want = 3
+		case b >= 0xC2:
+			want = 2
+		default:
+			// ASCII or continuation byte — no incomplete sequence here.
+			break
+		}
+		if want > 0 && len(p)-i < want {
+			return p[:i], p[i:]
+		}
+	}
+	return p, nil
 }
 
 // containsGBKExclusiveBytes reports whether p contains any byte pair whose
