@@ -416,13 +416,38 @@ var consoleMu sync.Mutex
 
 // ── main ────────────────────────────────────────────────────────────────────
 
+const sudoVersion = "sudo (cygctl) 1.2.1"
+
+const sudoHelp = `usage: sudo <command> [args...]
+       sudo -k
+
+Run a command with elevated (Administrator) privileges.
+
+Options:
+  -h, --help     display this help
+  -k             stop the background cygsec elevation daemon
+  -V, --version  display version
+
+sudo elevates via the fodhelper UAC bypass (no UAC prompt) when possible,
+falling back to a ShellExecuteEx "runas" dialog.  A background daemon
+(cygsec) persists for 24 hours so repeated calls don't retrigger UAC.
+
+stdin, stdout and stderr are forwarded transparently; exit codes are
+preserved; Ctrl+C is forwarded to the elevated process.`
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: sudo <command> [args...]")
-		fmt.Fprintln(os.Stderr, "       sudo -k          stop the cygsec tunnel daemon")
+		fmt.Fprintln(os.Stderr, "Try 'sudo --help' for more information.")
 		os.Exit(1)
 	}
 	switch os.Args[1] {
+	case "-h", "--help":
+		fmt.Println(sudoHelp)
+		os.Exit(0)
+	case "-V", "--version":
+		fmt.Println(sudoVersion)
+		os.Exit(0)
 	case "--client":
 		os.Exit(runClient(os.Args[2:]))
 	case "--cygsec":

@@ -247,13 +247,45 @@ func oemToUTF8(data []byte, fromCP uint32) []byte {
 	return result
 }
 
+const suVersion = "su (cygctl) 1.2.1"
+
+const suHelp = `usage: su <username> [command...]
+
+Switch to another Windows user account.
+
+Special accounts (no password required):
+  root, system, sys     NT AUTHORITY\SYSTEM via token duplication
+  ti, trustedinstaller  TrustedInstaller via token duplication
+
+Options:
+  -h, --help     display this help
+  -V, --version  display version
+
+For regular accounts su prompts for the target user's password and spawns
+a shell or command via CreateProcessWithLogonW (requires the Secondary
+Logon service, seclogon, to be running).
+
+For root/system/ti no password is needed — the token is duplicated from
+an existing privileged process in the current session.
+
+stdin, stdout and stderr are forwarded transparently; exit codes are
+preserved; Ctrl+C is forwarded to the remote process.`
+
 func main() {
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "Usage: su <username> [command...]")
+		fmt.Fprintln(os.Stderr, "Try 'su --help' for more information.")
 		os.Exit(1)
 	}
 
-	if os.Args[1] == "--client" {
+	switch os.Args[1] {
+	case "-h", "--help":
+		fmt.Println(suHelp)
+		os.Exit(0)
+	case "-V", "--version":
+		fmt.Println(suVersion)
+		os.Exit(0)
+	case "--client":
 		os.Exit(runClient(os.Args[2:]))
 	}
 
