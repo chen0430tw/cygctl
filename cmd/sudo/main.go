@@ -1072,18 +1072,60 @@ type msgWriter struct {
 	enc    *gob.Encoder
 	name   string
 	fromCP uint32
+	tail   []byte // incomplete UTF-8 sequence carried over from the previous Write
 }
 
 func (w *msgWriter) Write(p []byte) (n int, err error) {
-	data := p
-	if w.fromCP != 0 && w.fromCP != 65001 &&
-		(!utf8.Valid(p) || containsGBKExclusiveBytes(p) || containsGBKBlindZoneBytes(p)) {
-		data = oemToUTF8(p, w.fromCP)
+	// Prepend any incomplete UTF-8 sequence left over from the previous call so
+	// that the validity check and GBK detection always see complete sequences.
+	buf := p
+	if len(w.tail) > 0 {
+		buf = append(w.tail, p...)
+		w.tail = nil
+	}
+
+	data := buf
+	if w.fromCP != 0 && w.fromCP != 65001 {
+		complete, incomplete := splitIncompleteUTF8Tail(buf)
+		w.tail = append(w.tail, incomplete...)
+
+		if !utf8.Valid(complete) || containsGBKExclusiveBytes(complete) || containsGBKBlindZoneBytes(complete) {
+			data = oemToUTF8(complete, w.fromCP)
+		} else {
+			data = complete
+		}
+	}
+
+	if len(data) == 0 {
+		return len(p), nil
 	}
 	if err := w.enc.Encode(&msg{Name: w.name, Data: data}); err != nil {
 		return 0, err
 	}
 	return len(p), nil
+}
+
+// splitIncompleteUTF8Tail splits p into a complete prefix and an incomplete
+// UTF-8 trailing sequence (at most 3 bytes).
+func splitIncompleteUTF8Tail(p []byte) (complete, incomplete []byte) {
+	for i := len(p) - 1; i >= 0 && i >= len(p)-3; i-- {
+		b := p[i]
+		var want int
+		switch {
+		case b >= 0xF0:
+			want = 4
+		case b >= 0xE0:
+			want = 3
+		case b >= 0xC2:
+			want = 2
+		default:
+			break
+		}
+		if want > 0 && len(p)-i < want {
+			return p[:i], p[i:]
+		}
+	}
+	return p, nil
 }
 
 // ── Windows API helpers ────────────────────────────────────────────────────
