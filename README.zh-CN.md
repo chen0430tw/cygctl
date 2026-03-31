@@ -331,6 +331,12 @@ make install  # 安装至 Cygwin bin
 make clean    # 清理
 ```
 
+## 已知问题
+
+### Unicode 输出在 Claude Code 内置 bash 工具中显示乱码
+
+在 Claude Code 的集成 bash 工具中运行 `sudo <command>` 时，Unicode 制表符和方块字符（如 `█ ╔ ═ ╗`）可能显示为乱码的东亚字符。`sudo` 输出的字节是正确的 UTF-8，这是 Claude Code 输出管道的渲染问题。相同命令在 PowerShell、Windows Terminal、Cygwin bash 和 Git Bash 中均可正常显示。
+
 ## 许可证
 
 MIT

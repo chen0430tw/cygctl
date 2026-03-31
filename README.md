@@ -327,6 +327,12 @@ make install  # Install to Cygwin bin
 make clean    # Clean
 ```
 
+## Known Issues
+
+### Unicode output garbled in Claude Code's built-in bash tool
+
+When running `sudo <command>` inside Claude Code's integrated bash tool, Unicode box-drawing and block characters (e.g. `█ ╔ ═ ╗`) may appear as garbled East Asian characters. The bytes emitted by `sudo` are correct UTF-8 — this is a rendering issue in Claude Code's output pipeline. The same command displays correctly in PowerShell, Windows Terminal, Cygwin bash, and Git Bash.
+
 ## License
 
 MIT
